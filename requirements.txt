@@ -1,0 +1,26 @@
+# ── Pinned by hardware constraints (Intel i9, macOS 13, Python 3.11) ────────
+sentence-transformers==2.7.0
+transformers==4.40.2
+torch==2.2.2
+numpy==1.26.4
+pandas==2.3.3
+
+# ── Parsing ──────────────────────────────────────────────────────────────────
+docling==2.7.0
+
+# ── Vector DB (in-memory for Phase 0, switch to server in Phase 1+) ─────────
+qdrant-client==1.9.2
+
+# ── LLM ──────────────────────────────────────────────────────────────────────
+google-genai>=2.0.0
+
+# ── API ──────────────────────────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.3.0,<3.0.0
+python-dotenv>=1.0.0
+tiktoken>=0.7.0
