@@ -58,8 +58,21 @@ async def send_message(
     # 1. Persist the user message
     session_store.append_message(session_id, role="user", content=body.content)
 
-    # 2. Retrieve relevant context (non-blocking — pure CPU/network)
+    # 2. Retrieve relevant context
     retrieval_result = retrieve(query=body.content)
+
+    # Log what was retrieved so retrieval quality is visible in the terminal
+    if retrieval_result.chunks:
+        logger.info(
+            "Retrieved %d chunks for query %r:",
+            len(retrieval_result.chunks),
+            body.content[:80],
+        )
+        for i, c in enumerate(retrieval_result.chunks, 1):
+            snippet = c["content"][:120].replace("\n", " ")
+            logger.info("  [%d] score=%.4f | %s", i, c["score"], snippet)
+    else:
+        logger.info("No chunks retrieved for query %r", body.content[:80])
 
     # 3. Build the augmented prompt for this turn
     augmented_query = build_rag_prompt(body.content, retrieval_result.context)
@@ -67,7 +80,6 @@ async def send_message(
     # 4. Build message history for multi-turn context
     #    We pass all previous messages so Gemini has conversation history.
     history = session_store.get_messages(session_id)
-    # Replace the last user message content with the augmented version
     messages = []
     for msg in history[:-1]:   # all but the last (which we just stored)
         messages.append({"role": msg["role"], "content": msg["content"]})

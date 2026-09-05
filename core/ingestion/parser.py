@@ -125,41 +125,72 @@ class PdfParser(Parser):
         raw_file_uri = file_path.resolve().as_uri()
         chunks: list[ParsedChunk] = []
 
-        # export_to_markdown gives a clean, linearised representation;
-        # we also iterate structured items to get per-page provenance.
+        top_section: str = ""
+        current_section: str = ""
+        current_lines: list[str] = []
+        current_page: int | None = None
+        block_idx = 0
+
+        def _flush_block():
+            nonlocal block_idx, current_lines, top_section, current_section, current_page
+            if not current_lines:
+                return
+            if top_section and current_section and top_section != current_section:
+                sec_path = f"{top_section} > {current_section}"
+            else:
+                sec_path = top_section or current_section
+            header_prefix = f"[Section: {sec_path}]\n" if sec_path else ""
+            block_content = header_prefix + "\n".join(current_lines)
+            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{block_idx}"))
+            chunks.append(
+                ParsedChunk(
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    modality="text",
+                    content=block_content,
+                    source_locator=SourceLocator(page=current_page),
+                    raw_file_uri=raw_file_uri,
+                    parser_backend=self.BACKEND,
+                )
+            )
+            block_idx += 1
+            current_lines = []
+
         for idx, (item, _level) in enumerate(doc.iterate_items()):
-            # Only process text-bearing items in Phase 0
             item_type = type(item).__name__
-            if item_type not in ("TextItem", "SectionHeaderItem", "ListItem"):
+            if item_type not in ("TextItem", "SectionHeaderItem", "ListItem", "TableItem"):
                 continue
 
             text = item.text.strip() if hasattr(item, "text") else ""
+            if not text and hasattr(item, "export_to_markdown"):
+                text = item.export_to_markdown().strip()
             if not text:
                 continue
 
-            # Extract page number from provenance if available
             page_no: int | None = None
             if hasattr(item, "prov") and item.prov:
                 prov = item.prov[0]
                 if hasattr(prov, "page_no"):
                     page_no = prov.page_no
 
-            chunk_id = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{idx}")
-            )
+            if current_page is None:
+                current_page = page_no
 
-            chunks.append(
-                ParsedChunk(
-                    chunk_id=chunk_id,
-                    doc_id=doc_id,
-                    modality="text",
-                    content=text,
-                    source_locator=SourceLocator(page=page_no),
-                    raw_file_uri=raw_file_uri,
-                    parser_backend=self.BACKEND,
-                )
-            )
+            if item_type == "SectionHeaderItem":
+                _flush_block()
+                if text.isupper() and len(text) <= 30:
+                    top_section = text
+                    current_section = text
+                else:
+                    current_section = text
+                    current_lines.append(f"## {text}")
+                current_page = page_no
+            else:
+                current_lines.append(text)
+                if sum(len(line) for line in current_lines) >= 1500:
+                    _flush_block()
 
+        _flush_block()
         return chunks
 
 

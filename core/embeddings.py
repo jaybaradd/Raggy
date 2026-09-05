@@ -39,15 +39,28 @@ class LocalEmbeddingBackend(EmbeddingBackend):
     """
     Uses sentence-transformers to embed text entirely on-device.
 
-    Model is loaded once at construction time.
+    Model is loaded once at construction time. Supports Matryoshka dimension truncation.
     """
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, truncate_dim: int | None = None) -> None:
+        import torch
         from sentence_transformers import SentenceTransformer
 
         logger.info("Loading local embedding model '%s' …", model_name)
-        self._model = SentenceTransformer(model_name)
-        self._dim = self._model.get_sentence_embedding_dimension()
+        device = torch.device("cpu")
+        self._model = SentenceTransformer(
+            model_name,
+            device=device,
+            trust_remote_code=True,
+        )
+        
+        dim_to_use = truncate_dim or settings.local_embed_dim
+        if dim_to_use:
+            self._model.truncate_dim = dim_to_use
+            self._dim = dim_to_use
+        else:
+            self._dim = self._model.get_sentence_embedding_dimension()
+            
         logger.info("Local embedding model ready (dimension=%d).", self._dim)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
@@ -63,4 +76,7 @@ class LocalEmbeddingBackend(EmbeddingBackend):
 
 
 # Module-level singleton — constructed once at import time.
-embedder: EmbeddingBackend = LocalEmbeddingBackend(settings.local_embed_model)
+embedder: EmbeddingBackend = LocalEmbeddingBackend(
+    settings.local_embed_model,
+    truncate_dim=settings.local_embed_dim,
+)

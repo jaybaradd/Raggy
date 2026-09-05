@@ -7,6 +7,7 @@ pandas==2.3.3
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
 docling==2.7.0
+docling-core==2.8.0
 
 # ── Vector DB (in-memory for Phase 0, switch to server in Phase 1+) ─────────
 qdrant-client==1.9.2

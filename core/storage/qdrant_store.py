@@ -50,8 +50,10 @@ class QdrantStore:
 
         if settings.qdrant_url == ":memory:":
             self._client = QdrantClient(":memory:")
-        else:
+        elif settings.qdrant_url.startswith("http://") or settings.qdrant_url.startswith("https://"):
             self._client = QdrantClient(url=settings.qdrant_url)
+        else:
+            self._client = QdrantClient(path=settings.qdrant_url)
 
         self._ensure_collection()
 

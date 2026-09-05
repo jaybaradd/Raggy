@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     gemini_chat_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_CHAT_MODEL")
 
     # ── Embeddings ────────────────────────────────────────────────────────────
-    local_embed_model: str = Field(default="all-MiniLM-L6-v2", alias="LOCAL_EMBED_MODEL")
+    local_embed_model: str = Field(
+        default="cnmoro/snowflake-arctic-embed-m-v2.0-cpu", alias="LOCAL_EMBED_MODEL"
+    )
+    local_embed_dim: int = Field(default=256, alias="LOCAL_EMBED_DIM")
 
     # ── Qdrant ────────────────────────────────────────────────────────────────
     # ":memory:" → in-process Qdrant (no server needed, data lost on restart)
@@ -32,7 +35,7 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=50, alias="CHUNK_OVERLAP_TOKENS")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
+    retrieval_top_k: int = Field(default=15, alias="RETRIEVAL_TOP_K")
 
 
 # Module-level singleton — import this object everywhere.
