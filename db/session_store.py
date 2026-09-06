@@ -19,7 +19,8 @@ from typing import TypedDict
 class Message(TypedDict):
     role: str        # "user" | "assistant"
     content: str
-    created_at: str  # ISO-8601
+    created_at: str
+    attachments: list[dict]  # [{type, filename, doc_id}] — populated by Phase 3
 
 
 class Session(TypedDict):
@@ -61,14 +62,17 @@ class SessionStore:
             reverse=True,
         )
 
-    def append_message(self, session_id: str, role: str, content: str) -> None:
-        """Add a message to an existing session's history."""
+    def append_message(self, session_id: str, role: str, content: str, attachments: list[dict] | None = None) -> None:
+        """Append a message to a session's history."""
         session = self._sessions.get(session_id)
         if session is None:
             raise KeyError(f"Session '{session_id}' not found")
-        session["messages"].append(
-            {"role": role, "content": content, "created_at": _now_iso()}
-        )
+        session["messages"].append({
+            "role": role,
+            "content": content,
+            "created_at": _now_iso(),
+            "attachments": attachments or [],
+        })
 
     def get_messages(self, session_id: str) -> list[Message]:
         """Return the full message history for a session (for LLM context)."""

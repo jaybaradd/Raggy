@@ -1,58 +1,62 @@
-/**
- * app.js — Raggy Phase 0 frontend logic
- *
- * Responsibilities:
- *  - Session management (create, list, switch)
- *  - PDF upload with status toast
- *  - Send message → SSE stream → render tokens in real time
- *  - Auto-grow textarea, keyboard shortcuts
- *
- * No frameworks, no bundler. Pure vanilla JS (ES2022).
- * All API calls go to the same origin so no CORS issues in production.
- */
-
 'use strict';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const API = '';   // same-origin; prefix all paths with /api/...
+const API = '';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let currentSessionId = null;
 let isStreaming = false;
+let pendingFile = null;       // File object waiting to be uploaded on send
+let detectedYtUrl = null;     // YouTube URL detected in textarea
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const newChatBtn     = document.getElementById('newChatBtn');
-const sessionList    = document.getElementById('sessionList');
-const chatTitle      = document.getElementById('chatTitle');
-const messageThread  = document.getElementById('messageThread');
-const emptyState     = document.getElementById('emptyState');
-const messageInput   = document.getElementById('messageInput');
-const sendBtn        = document.getElementById('sendBtn');
-const fileInput      = document.getElementById('fileInput');
-const uploadStatus   = document.getElementById('uploadStatus');
-const uploadStatusIcon = document.getElementById('uploadStatusIcon');
-const uploadStatusText = document.getElementById('uploadStatusText');
-const toastClose     = document.getElementById('toastClose');
+const newChatBtn         = document.getElementById('newChatBtn');
+const sessionList        = document.getElementById('sessionList');
+const chatTitle          = document.getElementById('chatTitle');
+const messageThread      = document.getElementById('messageThread');
+const emptyState         = document.getElementById('emptyState');
+const messageInput       = document.getElementById('messageInput');
+const sendBtn            = document.getElementById('sendBtn');
+const fileInput          = document.getElementById('fileInput');
+const uploadStatus       = document.getElementById('uploadStatus');
+const uploadStatusIcon   = document.getElementById('uploadStatusIcon');
+const uploadStatusText   = document.getElementById('uploadStatusText');
+const toastClose         = document.getElementById('toastClose');
+const attachmentPreview  = document.getElementById('attachmentPreview');
+const attachmentName     = document.getElementById('attachmentName');
+const attachmentIcon     = document.getElementById('attachmentIcon');
+const attachmentRemove   = document.getElementById('attachmentRemove');
+const ytPrompt           = document.getElementById('ytPrompt');
+const ytConfirm          = document.getElementById('ytConfirm');
+const ytDismiss          = document.getElementById('ytDismiss');
 
-// ── Initialization ────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
   await loadSessions();
   bindEvents();
 })();
 
-// ── Event bindings ────────────────────────────────────────────────────────────
+// ── Events ────────────────────────────────────────────────────────────────────
 function bindEvents() {
   newChatBtn.addEventListener('click', createNewSession);
   sendBtn.addEventListener('click', sendMessage);
   toastClose.addEventListener('click', () => { uploadStatus.hidden = true; });
 
+  // Attachment file picker
   fileInput.addEventListener('change', () => {
-    if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+    if (fileInput.files.length > 0) setPendingFile(fileInput.files[0]);
+    fileInput.value = '';
   });
+
+  attachmentRemove.addEventListener('click', clearPendingFile);
+
+  // YouTube prompt buttons
+  ytConfirm.addEventListener('click', () => ingestYouTube(detectedYtUrl));
+  ytDismiss.addEventListener('click', () => { ytPrompt.hidden = true; detectedYtUrl = null; });
 
   messageInput.addEventListener('input', () => {
     autoGrow(messageInput);
-    sendBtn.disabled = messageInput.value.trim() === '' || isStreaming;
+    checkForYouTubeUrl(messageInput.value);
+    updateSendBtn();
   });
 
   messageInput.addEventListener('keydown', (e) => {
@@ -62,7 +66,6 @@ function bindEvents() {
     }
   });
 
-  // Suggestion chips
   document.querySelectorAll('.chip').forEach(chip => {
     chip.addEventListener('click', () => {
       messageInput.value = chip.dataset.prompt;
@@ -70,6 +73,72 @@ function bindEvents() {
       sendMessage();
     });
   });
+}
+
+// ── YouTube URL detection ─────────────────────────────────────────────────────
+const YT_REGEX = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[\w-]+/;
+
+function checkForYouTubeUrl(text) {
+  const match = text.match(YT_REGEX);
+  if (match) {
+    detectedYtUrl = match[0].startsWith('http') ? match[0] : 'https://' + match[0];
+    ytPrompt.hidden = false;
+  } else {
+    if (!ytPrompt.hidden) ytPrompt.hidden = true;
+    detectedYtUrl = null;
+  }
+}
+
+async function ingestYouTube(url) {
+  ytPrompt.hidden = true;
+  detectedYtUrl = null;
+  // Clean URL from input box if present
+  if (url && messageInput.value.includes(url)) {
+    messageInput.value = messageInput.value.replace(url, '').trim();
+    autoGrow(messageInput);
+    updateSendBtn();
+  }
+  showToast('⏳', `Ingesting YouTube video…`);
+  try {
+    const res = await fetch(`${API}/api/documents/youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌', `Failed: ${data.detail || 'Unknown error'}`); return; }
+    showToast('✅', `Ingested ${data.chunk_count} transcript chunks.`);
+    setTimeout(() => { uploadStatus.hidden = true; }, 5000);
+  } catch (err) {
+    showToast('❌', `Error: ${err.message}`);
+  }
+}
+
+// ── Attachment management ─────────────────────────────────────────────────────
+const MODALITY_ICONS = {
+  pdf: '📄', docx: '📝', pptx: '📊', xlsx: '📊', csv: '📊',
+  jpg: '🖼️', jpeg: '🖼️', png: '🖼️', webp: '🖼️', gif: '🖼️',
+  mp4: '🎬', mov: '🎬', avi: '🎬', webm: '🎬',
+};
+
+function setPendingFile(file) {
+  pendingFile = file;
+  const ext = file.name.split('.').pop().toLowerCase();
+  attachmentIcon.textContent = MODALITY_ICONS[ext] || '📎';
+  attachmentName.textContent = file.name;
+  attachmentPreview.hidden = false;
+  updateSendBtn();
+}
+
+function clearPendingFile() {
+  pendingFile = null;
+  attachmentPreview.hidden = true;
+  updateSendBtn();
+}
+
+function updateSendBtn() {
+  const hasText = messageInput.value.trim() !== '';
+  sendBtn.disabled = (!hasText && !pendingFile) || isStreaming;
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -120,28 +189,34 @@ function switchSession(sessionId, title) {
   currentSessionId = sessionId;
   chatTitle.textContent = title;
   clearThread();
-  loadSessions();   // refresh active highlight
+  loadSessions();
 }
 
-// ── Messages ──────────────────────────────────────────────────────────────────
+// ── Send message ──────────────────────────────────────────────────────────────
 async function sendMessage() {
   const content = messageInput.value.trim();
-  if (!content || isStreaming) return;
-
-  // Ensure we have a session
+  if ((!content && !pendingFile) || isStreaming) return;
   if (!currentSessionId) await createNewSession();
 
-  // Render user bubble immediately
+  // Parse the attached file inline — don't ingest into Qdrant yet.
+  // The parsed text becomes inline_context for this chat turn.
+  let inlineContext = '';
+  if (pendingFile) {
+    const file = pendingFile;
+    clearPendingFile();
+    inlineContext = await parseFile(file);
+  }
+
+  if (!content) return;   // file-only send with no text — nothing to ask
+
   appendBubble('user', content);
   messageInput.value = '';
   messageInput.style.height = 'auto';
-  sendBtn.disabled = true;
   isStreaming = true;
+  updateSendBtn();
 
-  // Hide empty state
   if (emptyState) emptyState.style.display = 'none';
 
-  // Create bot bubble with typing cursor
   const botBubble = appendBubble('bot', '');
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
@@ -151,7 +226,7 @@ async function sendMessage() {
     const res = await fetch(`${API}/api/sessions/${currentSessionId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, inline_context: inlineContext }),
     });
 
     if (!res.ok) {
@@ -168,32 +243,23 @@ async function sendMessage() {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop();   // keep incomplete line in buffer
-
+      buffer = lines.pop();
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const payload = line.slice(6).trim();
         if (payload === '[DONE]') break;
-
         try {
           const token = JSON.parse(payload);
-          if (token.error) {
-            botBubble.textContent = `⚠ Error: ${token.error}`;
-            return;
-          }
+          if (token.error) { botBubble.textContent = `⚠ Error: ${token.error}`; return; }
           botText += token;
-          // Render text without the cursor node, then re-add cursor at end
           botBubble.textContent = botText;
           botBubble.appendChild(cursor);
           scrollToBottom();
-        } catch (_) { /* non-JSON line — skip */ }
+        } catch (_) { /* non-JSON line */ }
       }
     }
-
-    // Remove cursor on completion
     cursor.remove();
     scrollToBottom();
 
@@ -202,35 +268,44 @@ async function sendMessage() {
     botBubble.textContent = `⚠ Network error: ${err.message}`;
   } finally {
     isStreaming = false;
-    sendBtn.disabled = messageInput.value.trim() === '';
+    updateSendBtn();
   }
 }
 
-// ── Upload ────────────────────────────────────────────────────────────────────
-async function uploadFile(file) {
-  showToast('⏳', `Uploading ${file.name}…`);
+// ── File helpers ──────────────────────────────────────────────────────────────
 
+/** Parse a file inline and return its text — does NOT store in Qdrant. */
+async function parseFile(file) {
+  showToast('⏳', `Reading ${file.name}…`);
   const formData = new FormData();
   formData.append('file', file);
-
-  // Reset file input so the same file can be re-uploaded if needed
-  fileInput.value = '';
-
   try {
-    const res = await fetch(`${API}/api/documents`, {
-      method: 'POST',
-      body: formData,
-    });
+    const res = await fetch(`${API}/api/documents/parse`, { method: 'POST', body: formData });
     const data = await res.json();
-
     if (!res.ok) {
-      showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`);
-      return;
+      showToast('❌', `Parse failed: ${data.detail || 'Unknown error'}`);
+      return '';
     }
+    showToast('✅', `Read "${file.name}" — asking about it now…`);
+    setTimeout(() => { uploadStatus.hidden = true; }, 3000);
+    return data.parsed_text || '';
+  } catch (err) {
+    showToast('❌', `Parse error: ${err.message}`);
+    return '';
+  }
+}
 
+/** Upload a file into the knowledge base (Qdrant). Used for explicit KB ingestion. */
+async function uploadFile(file) {
+  showToast('⏳', `Uploading ${file.name} to knowledge base…`);
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch(`${API}/api/documents`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return; }
     showToast('✅', `Indexed ${data.chunk_count} chunks from "${file.name}"`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
-
   } catch (err) {
     showToast('❌', `Upload error: ${err.message}`);
   }
@@ -240,15 +315,12 @@ async function uploadFile(file) {
 function appendBubble(role, text) {
   const row = document.createElement('div');
   row.className = `message-row ${role}`;
-
   const avatar = document.createElement('div');
   avatar.className = `avatar ${role}`;
   avatar.textContent = role === 'user' ? 'U' : '⬡';
-
   const bubble = document.createElement('div');
   bubble.className = `bubble ${role}`;
   bubble.textContent = text;
-
   row.appendChild(avatar);
   row.appendChild(bubble);
   messageThread.appendChild(row);
@@ -262,7 +334,6 @@ function clearThread() {
     const clone = emptyState.cloneNode(true);
     clone.style.display = '';
     messageThread.appendChild(clone);
-    // Re-bind chips on the cloned node
     clone.querySelectorAll('.chip').forEach(chip => {
       chip.addEventListener('click', () => {
         messageInput.value = chip.dataset.prompt;
@@ -273,9 +344,7 @@ function clearThread() {
   }
 }
 
-function scrollToBottom() {
-  messageThread.scrollTop = messageThread.scrollHeight;
-}
+function scrollToBottom() { messageThread.scrollTop = messageThread.scrollHeight; }
 
 function autoGrow(el) {
   el.style.height = 'auto';

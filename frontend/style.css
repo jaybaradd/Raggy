@@ -175,7 +175,6 @@ body {
   padding: 0 24px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
   flex-shrink: 0;
@@ -187,29 +186,111 @@ body {
   color: var(--text-primary);
 }
 
-.topbar-actions { display: flex; gap: 10px; align-items: center; }
 
-.upload-btn {
+/* ── Attach button (inside input-wrapper) ──────────────────────────────────── */
+.attach-btn {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--bg-surface-2);
-  color: var(--text-secondary);
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 500;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
 }
 
-.upload-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  border-color: rgba(255,255,255,0.15);
+.attach-btn:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
 }
+
+/* ── Attachment preview chip ───────────────────────────────────────────────── */
+.attachment-preview {
+  padding: 0 0 8px 0;
+}
+
+.attachment-preview[hidden] { display: none !important; }
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 320px;
+}
+
+.attachment-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+.attachment-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.attachment-remove:hover { color: var(--text-primary); }
+
+/* ── YouTube ingest prompt ─────────────────────────────────────────────────── */
+.yt-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  animation: slideIn 0.2s ease;
+}
+
+.yt-prompt[hidden] { display: none !important; }
+
+.yt-prompt-text { flex: 1; }
+
+.yt-confirm-btn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.yt-confirm-btn:hover { opacity: 0.85; }
+
+.yt-dismiss-btn {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.yt-dismiss-btn:hover { color: var(--text-primary); }
 
 /* ── Upload toast ──────────────────────────────────────────────────────────── */
 .upload-status {
@@ -418,11 +499,11 @@ body {
 .input-wrapper {
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 10px 10px 10px 16px;
+  padding: 10px 10px 10px 10px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 

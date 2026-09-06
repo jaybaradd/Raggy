@@ -30,7 +30,8 @@ class SessionListResponse(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=32_000)
-    # Phase 1+ will add: retrieval_modes, doc_id_filter, etc.
+    inline_context: str = Field(default="")  # parsed content of a chat-attached file (bypasses retrieval)
+    attachments: list[dict] = Field(default_factory=list)  # stub for Phase 3 inline multimodal
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────
@@ -38,16 +39,28 @@ class SendMessageRequest(BaseModel):
 class UploadDocumentResponse(BaseModel):
     doc_id: str
     filename: str
-    status: str   # "processing" | "done" | "error"
+    modality: str = ""
+    status: str
     chunk_count: int = 0
     message: str = ""
 
 
 class DocumentStatusResponse(BaseModel):
     doc_id: str
+    modality: str = ""
     status: str
     chunk_count: int
     message: str = ""
+
+
+class ParseDocumentResponse(BaseModel):
+    filename: str
+    modality: str
+    parsed_text: str  # raw parsed content, injected as inline_context in the chat turn
+
+
+class YouTubeIngestRequest(BaseModel):
+    url: str = Field(..., description="YouTube video URL")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

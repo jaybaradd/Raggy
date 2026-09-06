@@ -8,9 +8,16 @@ pandas==2.3.3
 # ── Parsing ──────────────────────────────────────────────────────────────────
 docling==2.7.0
 docling-core==2.8.0
+Pillow==10.3.0              # image loading
+rapidocr-onnxruntime>=1.3.0 # general-purpose OCR (PP-OCRv4 via ONNX, no PaddlePaddle needed)
+opencv-python==4.9.0.80    # video keyframe extraction
+faster-whisper==1.0.3       # local ASR for video/YouTube (fast CTranslate2 backend, no LLVM needed)
+yt-dlp>=2024.1.0           # YouTube audio download (no caption API needed)
+openpyxl>=3.1.5,<4.0.0     # XLSX reading for pandas (docling requires >=3.1.5)
 
 # ── Vector DB (in-memory for Phase 0, switch to server in Phase 1+) ─────────
 qdrant-client==1.9.2
+fastembed==0.3.6
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 google-genai>=2.0.0

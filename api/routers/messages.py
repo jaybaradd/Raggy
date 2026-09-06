@@ -58,27 +58,40 @@ async def send_message(
     # 1. Persist the user message
     session_store.append_message(session_id, role="user", content=body.content)
 
-    # 2. Retrieve relevant context
+    # 2. Build context
+    #    If the user attached a file inline, its parsed text comes in as inline_context.
+    #    That content is the primary source for this turn — prepend it before retrieval results.
+    inline = body.inline_context.strip()
     retrieval_result = retrieve(query=body.content)
 
+    if inline:
+        if retrieval_result.context:
+            combined_context = f"[Attached file]\n{inline}\n\n{retrieval_result.context}"
+        else:
+            combined_context = f"[Attached file]\n{inline}"
+    else:
+        combined_context = retrieval_result.context
+
     # Log what was retrieved so retrieval quality is visible in the terminal
+    if inline:
+        logger.info("Inline attachment context (%d chars) prepended for query %r", len(inline), body.content[:80])
     if retrieval_result.chunks:
         logger.info(
-            "Retrieved %d chunks for query %r:",
+            "Hybrid+rerank: %d chunks for query %r:",
             len(retrieval_result.chunks),
             body.content[:80],
         )
         for i, c in enumerate(retrieval_result.chunks, 1):
             snippet = c["content"][:120].replace("\n", " ")
-            logger.info("  [%d] score=%.4f | %s", i, c["score"], snippet)
+            rerank_score = c.get("rerank_score", c.get("score", 0.0))
+            logger.info("  [%d] rerank=%.4f | %s", i, rerank_score, snippet)
     else:
         logger.info("No chunks retrieved for query %r", body.content[:80])
 
     # 3. Build the augmented prompt for this turn
-    augmented_query = build_rag_prompt(body.content, retrieval_result.context)
+    augmented_query = build_rag_prompt(body.content, combined_context)
 
     # 4. Build message history for multi-turn context
-    #    We pass all previous messages so Gemini has conversation history.
     history = session_store.get_messages(session_id)
     messages = []
     for msg in history[:-1]:   # all but the last (which we just stored)
@@ -90,7 +103,7 @@ async def send_message(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable nginx buffering if behind a proxy
+            "X-Accel-Buffering": "no",
         },
     )
 

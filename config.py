@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     # ── Retrieval ─────────────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=15, alias="RETRIEVAL_TOP_K")
 
+    # Phase 1 — hybrid retrieval + reranking
+    # Number of candidates fetched from hybrid search before reranking
+    hybrid_candidates: int = Field(default=20, alias="HYBRID_CANDIDATES")
+    # Cross-encoder model for reranking (sentence-transformers cross-encoder)
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
+    )
+    # How many chunks the reranker passes to the LLM
+    reranker_top_n: int = Field(default=6, alias="RERANKER_TOP_N")
+
+    # ── Phase 1B — Multimodal ingestion ──────────────────────────────────────
+    upload_dir: str = Field(default="./uploaded_files", alias="UPLOAD_DIR")
+    whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
+    table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
+
 
 # Module-level singleton — import this object everywhere.
 settings = Settings()
