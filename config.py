@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     # ── Phase 1B — Multimodal ingestion ──────────────────────────────────────
     upload_dir: str = Field(default="./uploaded_files", alias="UPLOAD_DIR")
+    metadata_db_path: str = Field(default="./raggy_metadata.sqlite3", alias="METADATA_DB_PATH")
     whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
 

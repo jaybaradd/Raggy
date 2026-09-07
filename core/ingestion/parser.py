@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +35,20 @@ class ParsedChunk(BaseModel):
     context_prefix: str | None = None
     source_locator: SourceLocator
     raw_file_uri: str
+    source_name: str | None = None
     parser_backend: str
     embedding_model: str = ""
-    created_at: datetime = datetime.now(timezone.utc)
+    # Forward-compatible evidence metadata; old parser call sites may omit it.
+    evidence_id: str | None = None
+    representation: Literal["text", "ocr", "caption", "transcript", "frame", "layout"] = "text"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ── Abstract Parser ───────────────────────────────────────────────────────────
 
 class Parser(ABC):
     @abstractmethod
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         ...
 
 
@@ -62,6 +66,7 @@ def _make_chunk(
     locator: SourceLocator,
     raw_file_uri: str,
     backend: str,
+    representation: Literal["text", "ocr", "caption", "transcript", "frame", "layout"] = "text",
 ) -> ParsedChunk:
     chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{index}"))
     return ParsedChunk(
@@ -72,7 +77,9 @@ def _make_chunk(
         source_locator=locator,
         raw_file_uri=raw_file_uri,
         parser_backend=backend,
-    )
+        evidence_id=chunk_id,
+        representation=representation,
+        )
 
 
 # ── PDF Parser ────────────────────────────────────────────────────────────────
@@ -86,7 +93,7 @@ class PdfParser(Parser):
         from docling.document_converter import DocumentConverter
         self._converter = DocumentConverter()
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         result = self._converter.convert(str(file_path))
         doc = result.document
         raw_file_uri = file_path.resolve().as_uri()
@@ -164,7 +171,7 @@ class DocxParser(Parser):
         from docling.document_converter import DocumentConverter
         self._converter = DocumentConverter()
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         result = self._converter.convert(str(file_path))
         text = result.document.export_to_markdown()
         raw_file_uri = file_path.resolve().as_uri()
@@ -182,7 +189,7 @@ class XlsxParser(Parser):
 
     BACKEND = "pandas-xlsx"
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         import pandas as pd
         from config import settings
 
@@ -246,7 +253,7 @@ class ImageParser(Parser):
         self._torch = torch
         self._ocr = RapidOCR()
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         import numpy as np
         from PIL import Image
 
@@ -264,18 +271,48 @@ class ImageParser(Parser):
         ocr_lines = [item[1] for item in ocr_result if item[1].strip()] if ocr_result else []
         ocr_text = "\n".join(ocr_lines)
 
-        # Combine: always include caption; append OCR text if found
+        # Keep model-generated description and literal OCR as separate evidence
+        # units. They share an asset but must remain distinguishable for
+        # retrieval, confidence handling, and citations.
+        chunks = [_make_chunk(
+            doc_id, 0,
+            f"[Image: {file_path.name}]\n{caption}",
+            "image",
+            SourceLocator(),
+            raw_file_uri,
+            self.BACKEND,
+            representation="caption",
+        )]
         if ocr_text:
-            content = (
-                f"[Image: {file_path.name}]\n"
-                f"Visual: {caption}\n"
-                f"Text in image:\n{ocr_text}"
-            )
-        else:
-            content = f"[Image: {file_path.name}]\n{caption}"
+            chunks.append(_make_chunk(
+                doc_id, 1,
+                f"[Image: {file_path.name}]\nText in image:\n{ocr_text}",
+                "image",
+                SourceLocator(bbox=_ocr_union_bbox(ocr_result)),
+                raw_file_uri,
+                self.BACKEND,
+                representation="ocr",
+            ))
+        return chunks
 
-        return [_make_chunk(doc_id, 0, content, "image",
-                            SourceLocator(), raw_file_uri, self.BACKEND)]
+
+def _ocr_union_bbox(ocr_result) -> tuple[float, float, float, float] | None:
+    """Return one bounding box covering all OCR regions, when available."""
+    points = []
+    for item in ocr_result or []:
+        if not item or len(item) < 1:
+            continue
+        box = item[0]
+        if not isinstance(box, (list, tuple)):
+            continue
+        for point in box:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                points.append((float(point[0]), float(point[1])))
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 
@@ -350,7 +387,7 @@ class VideoParser(Parser):
 
     BACKEND = "whisper-video"
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         raw_file_uri = file_path.resolve().as_uri()
         segments = _transcribe_audio(str(file_path))
         merged = _merge_segments(segments, max_words=120, max_duration=60.0)
@@ -448,10 +485,11 @@ class YouTubeParser(Parser):
 
     BACKEND = "youtube"
 
-    def parse(self, file_path: Path, doc_id: str) -> list[ParsedChunk]:
+    def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         import tempfile
 
-        url = file_path.name  # URL embedded as fake path by the router
+        # Keep the complete URL. ``Path(url).name`` strips the scheme and host.
+        url = str(file_path)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

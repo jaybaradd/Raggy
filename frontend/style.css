@@ -466,6 +466,39 @@ body {
   border-bottom-left-radius: var(--radius-sm);
 }
 
+.source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.source-list-heading {
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.source-card {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.source-card-title {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.source-card-details { color: var(--text-muted); }
+.source-card a { color: var(--accent); text-decoration: none; }
+.source-card a:hover { text-decoration: underline; }
+
 /* Typing cursor */
 .cursor {
   display: inline-block;

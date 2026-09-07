@@ -107,7 +107,14 @@ async function ingestYouTube(url) {
     });
     const data = await res.json();
     if (!res.ok) { showToast('❌', `Failed: ${data.detail || 'Unknown error'}`); return; }
-    showToast('✅', `Ingested ${data.chunk_count} transcript chunks.`);
+    const status = data.status === 'processing'
+      ? await waitForDocument(data.doc_id, 'YouTube transcript')
+      : data;
+    if (status.status === 'error') {
+      showToast('❌', `Ingestion failed: ${status.message || 'Unknown error'}`);
+      return;
+    }
+    showToast('✅', `Ingested ${status.chunk_count} transcript chunks.`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
   } catch (err) {
     showToast('❌', `Error: ${err.message}`);
@@ -239,6 +246,7 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let buffer = '';
     let botText = '';
+    let sourceMetadata = [];
 
     while (true) {
       const { done, value } = await reader.read();
@@ -251,8 +259,13 @@ async function sendMessage() {
         const payload = line.slice(6).trim();
         if (payload === '[DONE]') break;
         try {
-          const token = JSON.parse(payload);
-          if (token.error) { botBubble.textContent = `⚠ Error: ${token.error}`; return; }
+          const parsed = JSON.parse(payload);
+          if (parsed && parsed.type === 'sources') {
+            sourceMetadata = parsed.sources || [];
+            continue;
+          }
+          if (parsed && parsed.error) { botBubble.textContent = `⚠ Error: ${parsed.error}`; return; }
+          const token = typeof parsed === 'string' ? parsed : (parsed.token || '');
           botText += token;
           botBubble.textContent = botText;
           botBubble.appendChild(cursor);
@@ -261,6 +274,7 @@ async function sendMessage() {
       }
     }
     cursor.remove();
+    renderSources(botBubble, sourceMetadata);
     scrollToBottom();
 
   } catch (err) {
@@ -304,11 +318,90 @@ async function uploadFile(file) {
     const res = await fetch(`${API}/api/documents`, { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return; }
-    showToast('✅', `Indexed ${data.chunk_count} chunks from "${file.name}"`);
+    const status = data.status === 'processing'
+      ? await waitForDocument(data.doc_id, file.name)
+      : data;
+    if (status.status === 'error') {
+      showToast('❌', `Indexing failed: ${status.message || 'Unknown error'}`);
+      return;
+    }
+    showToast('✅', `Indexed ${status.chunk_count} chunks from "${file.name}"`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
   } catch (err) {
     showToast('❌', `Upload error: ${err.message}`);
   }
+}
+
+/** Poll the asynchronous ingestion job until it reaches a terminal state. */
+async function waitForDocument(docId, label) {
+  const maxAttempts = 1200; // 20 minutes at one request per second
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const res = await fetch(`${API}/api/documents/${docId}/status`);
+    const status = await res.json();
+    if (!res.ok) throw new Error(status.detail || `Could not read ${label} status`);
+    if (status.status === 'processing') {
+      showToast('⏳', `${label}: still processing…`);
+      continue;
+    }
+    return status;
+  }
+  throw new Error(`${label} ingestion timed out`);
+}
+
+function renderSources(botBubble, sources) {
+  if (!sources || sources.length === 0) return;
+
+  const container = document.createElement('div');
+  container.className = 'source-list';
+  const heading = document.createElement('div');
+  heading.className = 'source-list-heading';
+  heading.textContent = 'Sources';
+  container.appendChild(heading);
+
+  sources.forEach(source => {
+    const card = document.createElement('div');
+    card.className = 'source-card';
+    const title = document.createElement('span');
+    title.className = 'source-card-title';
+    title.textContent = `[${source.source_index}] ${source.filename || source.doc_id || 'Source'}`;
+    card.appendChild(title);
+
+    const details = document.createElement('span');
+    details.className = 'source-card-details';
+    details.textContent = [
+      source.representation,
+      source.page ? `page ${source.page}` : '',
+      source.cell_range || '',
+      source.time_range ? formatTimeRange(source.time_range) : '',
+      source.bbox ? 'image region' : '',
+    ].filter(Boolean).join(' · ');
+    card.appendChild(details);
+
+    if (source.source_url) {
+      const link = document.createElement('a');
+      link.href = source.source_url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'open';
+      card.appendChild(link);
+    }
+    container.appendChild(card);
+  });
+  botBubble.appendChild(container);
+}
+
+function formatTimeRange(range) {
+  if (!Array.isArray(range) || range.length < 2) return '';
+  return `${formatSeconds(range[0])}–${formatSeconds(range[1])}`;
+}
+
+function formatSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return '';
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${minutes}:${remainder}`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

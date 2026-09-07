@@ -12,16 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from api.schemas import DocumentStatusResponse, ParseDocumentResponse, UploadDocumentResponse, YouTubeIngestRequest
 from config import settings
 from core.embeddings import embedder
 from core.ingestion.chunker import chunk_parsed_chunks
+from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import compute_doc_id, get_parser
+from core.storage.evidence_store import evidence_store
 from core.storage.qdrant_store import qdrant_store
 
 logger = logging.getLogger(__name__)
@@ -38,10 +40,32 @@ _SUPPORTED_EXTENSIONS = {
 
 
 def _upload_path(doc_id: str, filename: str) -> Path:
-    """Return (and create) a stable path for a raw uploaded file."""
+    """Return a stable, traversal-safe path for a raw uploaded file."""
     dest = Path(settings.upload_dir) / doc_id
     dest.mkdir(parents=True, exist_ok=True)
-    return dest / filename
+    safe_name = Path(filename).name or "upload"
+    return dest / safe_name
+
+
+async def _run_ingestion_job(
+    file_path: Path | str,
+    doc_id: str,
+    modality: str,
+    filename: str,
+) -> None:
+    """Run heavy parsing off the event loop and update the in-memory status."""
+    try:
+        chunk_count = await asyncio.to_thread(_ingest, file_path, doc_id, modality, filename)
+    except Exception as exc:
+        logger.exception("Ingestion failed for '%s'", filename)
+        _doc_registry[doc_id] = DocumentStatusResponse(
+            doc_id=doc_id, modality=modality, status="error", chunk_count=0, message=str(exc)
+        )
+        return
+
+    _doc_registry[doc_id] = DocumentStatusResponse(
+        doc_id=doc_id, modality=modality, status="done", chunk_count=chunk_count
+    )
 
 
 @router.post("", response_model=UploadDocumentResponse, status_code=202)
@@ -58,35 +82,33 @@ async def upload_document(file: UploadFile) -> UploadDocumentResponse:
     file_bytes = await file.read()
     doc_id = compute_doc_id(file_bytes)
 
-    if doc_id in _doc_registry and _doc_registry[doc_id].status == "done":
+    if doc_id in _doc_registry and _doc_registry[doc_id].status in {"processing", "done"}:
         cached = _doc_registry[doc_id]
         return UploadDocumentResponse(
-            doc_id=doc_id, filename=filename, status="done",
-            chunk_count=cached.chunk_count, message="Already indexed.",
+            doc_id=doc_id, filename=filename, modality=ext.lstrip("."), status=cached.status,
+            chunk_count=cached.chunk_count,
+            message="Already indexed." if cached.status == "done" else "Ingestion already processing.",
         )
 
-    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, status="processing", chunk_count=0)
+    modality = ext.lstrip(".")
+    _doc_registry[doc_id] = DocumentStatusResponse(
+        doc_id=doc_id, modality=modality, status="processing", chunk_count=0
+    )
 
     # Persist raw file to disk so raw_file_uri is a real path
     file_path = _upload_path(doc_id, filename)
     file_path.write_bytes(file_bytes)
-    modality = ext.lstrip(".")
-
-    # Run the heavy parsing/embedding work off the event loop
-    loop = asyncio.get_event_loop()
-    try:
-        chunk_count = await loop.run_in_executor(None, _ingest, file_path, doc_id, modality, filename)
-    except Exception as exc:
-        logger.exception("Ingestion failed for '%s'", filename)
-        _doc_registry[doc_id] = DocumentStatusResponse(
-            doc_id=doc_id, status="error", chunk_count=0, message=str(exc)
-        )
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
-
-    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, status="done", chunk_count=chunk_count)
+    evidence_store.upsert_asset(AssetRecord(
+        asset_id=doc_id,
+        filename=filename,
+        media_type=file.content_type or "application/octet-stream",
+        raw_file_uri=file_path.resolve().as_uri(),
+        content_hash=doc_id,
+    ))
+    asyncio.create_task(_run_ingestion_job(file_path, doc_id, modality, filename))
     return UploadDocumentResponse(
-        doc_id=doc_id, filename=filename, status="done",
-        chunk_count=chunk_count, message=f"Ingested {chunk_count} chunks.",
+        doc_id=doc_id, filename=filename, modality=modality, status="processing",
+        chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
     )
 
 
@@ -132,33 +154,30 @@ async def ingest_youtube(body: YouTubeIngestRequest) -> UploadDocumentResponse:
     url = body.url
     doc_id = compute_doc_id(url.encode())
 
-    if doc_id in _doc_registry and _doc_registry[doc_id].status == "done":
+    if doc_id in _doc_registry and _doc_registry[doc_id].status in {"processing", "done"}:
         cached = _doc_registry[doc_id]
         return UploadDocumentResponse(
-            doc_id=doc_id, filename=url, status="done",
-            chunk_count=cached.chunk_count, message="Already indexed.",
+            doc_id=doc_id, filename=url, modality="youtube", status=cached.status,
+            chunk_count=cached.chunk_count,
+            message="Already indexed." if cached.status == "done" else "Ingestion already processing.",
         )
 
-    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, status="processing", chunk_count=0)
+    _doc_registry[doc_id] = DocumentStatusResponse(
+        doc_id=doc_id, modality="youtube", status="processing", chunk_count=0
+    )
+    evidence_store.upsert_asset(AssetRecord(
+        asset_id=doc_id,
+        filename=url,
+        media_type="video/x-youtube",
+        raw_file_uri=url,
+        content_hash=doc_id,
+    ))
 
-    # YouTubeParser reads the URL from file_path.name — pass it as a fake Path
-    fake_path = Path(url)
-
-    # yt-dlp + Whisper can take several minutes — run off the event loop
-    loop = asyncio.get_event_loop()
-    try:
-        chunk_count = await loop.run_in_executor(None, _ingest, fake_path, doc_id, "youtube", url)
-    except Exception as exc:
-        logger.exception("YouTube ingestion failed for '%s'", url)
-        _doc_registry[doc_id] = DocumentStatusResponse(
-            doc_id=doc_id, status="error", chunk_count=0, message=str(exc)
-        )
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
-
-    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, status="done", chunk_count=chunk_count)
+    # Pass the complete URL as a string; YouTubeParser preserves it for yt-dlp.
+    asyncio.create_task(_run_ingestion_job(url, doc_id, "youtube", url))
     return UploadDocumentResponse(
-        doc_id=doc_id, filename=url, status="done",
-        chunk_count=chunk_count, message=f"Ingested {chunk_count} chunks from YouTube.",
+        doc_id=doc_id, filename=url, modality="youtube", status="processing",
+        chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
     )
 
 
@@ -170,9 +189,22 @@ def document_status(doc_id: str) -> DocumentStatusResponse:
     return record
 
 
+@router.get("/{doc_id}/source")
+def document_source(doc_id: str) -> FileResponse:
+    """Serve an uploaded source through the API, never exposing file:// URIs."""
+    directory = Path(settings.upload_dir) / doc_id
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail="Source file not found")
+    files = [path for path in directory.iterdir() if path.is_file()]
+    if not files:
+        raise HTTPException(status_code=404, detail="Source file not found")
+    source = files[0]
+    return FileResponse(source, filename=source.name)
+
+
 # ── Internal ingestion pipeline ───────────────────────────────────────────────
 
-def _ingest(file_path: Path, doc_id: str, modality: str, filename: str) -> int:
+def _ingest(file_path: Path | str, doc_id: str, modality: str, filename: str) -> int:
     logger.info("Parsing '%s' (doc_id=%s, modality=%s) …", filename, doc_id[:8], modality)
     parser = get_parser(modality)
     raw_chunks = parser.parse(file_path, doc_id)
@@ -189,7 +221,11 @@ def _ingest(file_path: Path, doc_id: str, modality: str, filename: str) -> int:
 
     for chunk in chunks:
         chunk.embedding_model = settings.local_embed_model
+        chunk.source_name = Path(filename).name if modality != "youtube" else filename
 
+    evidence_store.upsert_evidence([
+        EvidenceSegment.from_chunk(chunk) for chunk in chunks
+    ])
     qdrant_store.upsert(chunks, vectors)
     logger.info("Stored %d chunks for doc_id=%s", len(chunks), doc_id[:8])
     return len(chunks)

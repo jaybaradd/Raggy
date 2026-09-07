@@ -1,1 +1,8 @@
 start parsing the document as soon as it is uploaded
+
+Contextual retrieval prefixes.
+Separate OCR/caption/frame evidence for images.
+Visual embeddings.
+Video keyframe extraction and frame/transcript linking.
+Better frontend citation rendering.
+Golden retrieval evaluation sets.

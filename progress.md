@@ -2,6 +2,35 @@
 
 ---
 
+## Phase 1 — Evidence contracts and asynchronous ingestion
+
+### ✅ [2026-09-07] Phase 1 foundation slice
+
+- Added forward-compatible `AssetRecord` and `EvidenceSegment` models in `core/ingestion/models.py`.
+- Added stable evidence IDs, representation metadata, and per-instance timestamps to `ParsedChunk`.
+- Preserved evidence/provenance fields in Qdrant payloads (timestamp, cell range, bounding box, and representation).
+- Changed document and YouTube ingestion to return immediately with `processing` status and complete in a background thread; the status endpoint now reports terminal state.
+- Fixed YouTube URL handling so the complete URL reaches yt-dlp instead of being reduced to a `Path.name`.
+- Sanitized uploaded filenames to prevent path traversal.
+- Updated the frontend to poll asynchronous ingestion status and display completion/errors.
+
+### ✅ [2026-09-07] Durable evidence metadata and modality routing
+
+- Added a local SQLite `EvidenceStore` for restart-safe asset and evidence metadata; its interface is intentionally replaceable by Postgres in Phase 2.
+- Persisted parsed evidence segments with modality, representation, source locator, parser provenance, and media URI.
+- Added lazy modality-specific Qdrant collections (`kb_table_chunks`, `kb_image_chunks`, and `kb_video_segments`) while retaining `kb_text_chunks` for compatibility.
+- Added cross-collection retrieval with initial modality weights and preserved collection/evidence identifiers in results.
+- Deferred contextual retrieval prefixes as a future adaptive optimization; Phase 1 will proceed using structural metadata, evidence locators, and retrieval evaluation first.
+- Scoped Phase 1 image work to separate OCR and caption evidence. Visual embeddings, image-region search, video keyframes, and frame/transcript fusion are deferred to future scope.
+
+### ✅ [2026-09-07] Image evidence separation and citation metadata
+
+- Updated `ImageParser` to emit distinct caption and OCR evidence units with separate evidence IDs and OCR bounding-box provenance.
+- Added source filenames and representation metadata to indexed chunks.
+- Added a structured `sources` SSE event before assistant tokens, carrying evidence IDs, modality, representation, and page/time/cell/bbox locators.
+- Added frontend source cards for assistant responses, including page, spreadsheet range, image-region, timestamp, and external URL details where available.
+- Added `/api/documents/{doc_id}/source` so local citations resolve through the API instead of exposing `file://` paths.
+
 ## Phase 0 — Foundations
 
 ### ✅ [2026-09-04] Initial scaffold & local embedding cleanup

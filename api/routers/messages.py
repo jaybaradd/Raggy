@@ -98,8 +98,30 @@ async def send_message(
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": augmented_query})
 
+    sources = [
+        {
+            "source_index": index,
+            "evidence_id": chunk.get("evidence_id", chunk.get("chunk_id")),
+            "doc_id": chunk.get("doc_id"),
+            "filename": chunk.get("source_name"),
+            "modality": chunk.get("modality"),
+            "representation": chunk.get("representation", "text"),
+            "page": chunk.get("page"),
+            "time_range": chunk.get("time_range"),
+            "cell_range": chunk.get("cell_range"),
+            "bbox": chunk.get("bbox"),
+            "raw_file_uri": chunk.get("raw_file_uri"),
+            "source_url": (
+                chunk.get("raw_file_uri")
+                if str(chunk.get("raw_file_uri", "")).startswith("http")
+                else f"/api/documents/{chunk.get('doc_id')}/source"
+            ),
+        }
+        for index, chunk in enumerate(retrieval_result.chunks, start=1)
+    ]
+
     return StreamingResponse(
-        _stream_response(session_id, messages),
+        _stream_response(session_id, messages, sources),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -108,13 +130,20 @@ async def send_message(
     )
 
 
-async def _stream_response(session_id: str, messages: list[dict]):
+async def _stream_response(
+    session_id: str,
+    messages: list[dict],
+    sources: list[dict],
+):
     """
     Generator that yields SSE-formatted tokens and accumulates the full reply.
     """
     full_reply: list[str] = []
 
     try:
+        # Send structured provenance before token generation. Existing clients
+        # can ignore this event and continue consuming token data events.
+        yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
         async for token in gemini_provider.chat_stream(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,

@@ -70,12 +70,20 @@ class QdrantStore:
                       settings so callers rarely need to override it.
     """
 
-    def __init__(self, collection_name: str | None = None) -> None:
+    def __init__(
+        self,
+        collection_name: str | None = None,
+        *,
+        client: QdrantClient | None = None,
+        bm25_encoder=None,
+    ) -> None:
         self._collection = collection_name or settings.qdrant_collection
         self._dim = embedder.dimension
-        self._bm25 = _build_bm25_encoder()
+        self._bm25 = bm25_encoder or _build_bm25_encoder()
 
-        if settings.qdrant_url == ":memory:":
+        if client is not None:
+            self._client = client
+        elif settings.qdrant_url == ":memory:":
             self._client = QdrantClient(":memory:")
         elif settings.qdrant_url.startswith("http://") or settings.qdrant_url.startswith("https://"):
             self._client = QdrantClient(url=settings.qdrant_url)
@@ -124,6 +132,27 @@ class QdrantStore:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def _collection_store(self, modality: str) -> "QdrantStore":
+        """Return a lazily-created collection sharing this store's client."""
+        collection = {
+            "text": settings.qdrant_collection,
+            "table": "kb_table_chunks",
+            "image": "kb_image_chunks",
+            "video_segment": "kb_video_segments",
+            "audio_segment": "kb_video_segments",
+        }.get(modality, settings.qdrant_collection)
+        if collection == self._collection:
+            return self
+        stores = getattr(self, "_modality_stores", {})
+        if collection not in stores:
+            stores[collection] = QdrantStore(
+                collection,
+                client=self._client,
+                bm25_encoder=self._bm25,
+            )
+            self._modality_stores = stores
+        return stores[collection]
+
     def upsert(
         self,
         chunks: list[ParsedChunk],
@@ -142,6 +171,27 @@ class QdrantStore:
                 f"chunks ({len(chunks)}) and vectors ({len(vectors)}) must be same length"
             )
 
+        # Route each modality to its own collection while retaining the
+        # existing text collection name for backwards compatibility.
+        groups: dict[str, tuple[list[ParsedChunk], list[list[float]]]] = {}
+        for chunk, vector in zip(chunks, vectors):
+            group = groups.setdefault(chunk.modality, ([], []))
+            group[0].append(chunk)
+            group[1].append(vector)
+        if len(groups) > 1 or (groups and next(iter(groups)) != "text"):
+            for modality, (group_chunks, group_vectors) in groups.items():
+                self._collection_store(modality)._upsert_single(group_chunks, group_vectors)
+            return
+
+        self._upsert_single(chunks, vectors)
+
+    def _upsert_single(
+        self,
+        chunks: list[ParsedChunk],
+        vectors: list[list[float]],
+    ) -> None:
+        """Upsert chunks known to belong to this collection."""
+
         # Compute BM25 sparse vectors for all chunk texts in one batch
         texts = [c.content for c in chunks]
         sparse_vecs = self._encode_sparse(texts)
@@ -155,10 +205,17 @@ class QdrantStore:
                 },
                 payload={
                     "chunk_id": chunk.chunk_id,
+                    "evidence_id": chunk.evidence_id or chunk.chunk_id,
                     "doc_id": chunk.doc_id,
                     "modality": chunk.modality,
+                    "representation": chunk.representation,
                     "content": chunk.content,
+                    "context_prefix": chunk.context_prefix,
+                    "source_name": chunk.source_name,
                     "page": chunk.source_locator.page,
+                    "time_range": chunk.source_locator.time_range,
+                    "cell_range": chunk.source_locator.cell_range,
+                    "bbox": chunk.source_locator.bbox,
                     "raw_file_uri": chunk.raw_file_uri,
                     "parser_backend": chunk.parser_backend,
                     "embedding_model": chunk.embedding_model,
@@ -170,6 +227,26 @@ class QdrantStore:
 
         self._client.upsert(collection_name=self._collection, points=points)
         logger.info("Upserted %d chunks into '%s'", len(points), self._collection)
+
+    def search_all(
+        self,
+        query_vector: list[float],
+        query_text: str,
+        top_k: int | None = None,
+        doc_id_filter: str | None = None,
+    ) -> list[dict]:
+        """Search all modality collections and apply lightweight modality weights."""
+        k = top_k or settings.hybrid_candidates
+        weights = {"text": 1.0, "table": 1.0, "image": 0.8, "video_segment": 0.7, "audio_segment": 0.7}
+        results: list[dict] = []
+        for modality in ("text", "table", "image", "video_segment"):
+            store = self._collection_store(modality)
+            for result in store.search(query_vector, query_text, k, doc_id_filter):
+                result["score"] = float(result.get("score", 0.0)) * weights.get(modality, 1.0)
+                result["collection"] = store._collection
+                results.append(result)
+        results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return results[:k]
 
     def search(
         self,

@@ -73,7 +73,7 @@ def retrieve(
     query_vector = embedder.encode_query(clean_q)
 
     # Step 2: Hybrid search — dense + BM25 sparse, RRF-fused
-    candidates = qdrant_store.search(
+    candidates = qdrant_store.search_all(
         query_vector=query_vector,
         query_text=clean_q,
         top_k=top_k or settings.hybrid_candidates,

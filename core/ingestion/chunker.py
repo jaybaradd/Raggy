@@ -164,8 +164,11 @@ def chunk_parsed_chunks(raw_chunks: list[ParsedChunk]) -> list[ParsedChunk]:
                     context_prefix=None,   # Phase 1
                     source_locator=parent.source_locator,
                     raw_file_uri=parent.raw_file_uri,
+                    source_name=parent.source_name,
                     parser_backend=parent.parser_backend,
                     embedding_model=parent.embedding_model,
+                    evidence_id=child_id,
+                    representation=parent.representation,
                     created_at=datetime.now(timezone.utc),
                 )
             )
