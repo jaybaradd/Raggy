@@ -27,6 +27,7 @@ class Message(TypedDict):
 class Session(TypedDict):
     session_id: str
     title: str
+    project_scope: str | None
     created_at: str
     messages: list[Message]
 
@@ -42,11 +43,12 @@ class SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
 
-    def create_session(self, title: str = "New chat") -> Session:
+    def create_session(self, title: str = "New chat", project_scope: str | None = None) -> Session:
         session_id = str(uuid.uuid4())
         session: Session = {
             "session_id": session_id,
             "title": title,
+            "project_scope": project_scope,
             "created_at": _now_iso(),
             "messages": [],
         }

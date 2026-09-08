@@ -12,6 +12,7 @@ let detectedYtUrl = null;     // YouTube URL detected in textarea
 const newChatBtn         = document.getElementById('newChatBtn');
 const sessionList        = document.getElementById('sessionList');
 const chatTitle          = document.getElementById('chatTitle');
+const projectScopeInput  = document.getElementById('projectScopeInput');
 const messageThread      = document.getElementById('messageThread');
 const emptyState         = document.getElementById('emptyState');
 const messageInput       = document.getElementById('messageInput');
@@ -168,9 +169,9 @@ function renderSessionList(sessions) {
   sessions.forEach(session => {
     const el = document.createElement('div');
     el.className = 'session-item' + (session.session_id === currentSessionId ? ' active' : '');
-    el.textContent = session.title;
+    el.textContent = session.project_scope ? `${session.title} · ${session.project_scope}` : session.title;
     el.dataset.id = session.session_id;
-    el.addEventListener('click', () => switchSession(session.session_id, session.title));
+    el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope));
     sessionList.appendChild(el);
   });
 }
@@ -180,11 +181,16 @@ async function createNewSession() {
     const res = await fetch(`${API}/api/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'New chat' }),
+      body: JSON.stringify({
+        title: 'New chat',
+        project_scope: projectScopeInput.value.trim() || null,
+      }),
     });
     const session = await res.json();
     currentSessionId = session.session_id;
-    chatTitle.textContent = session.title;
+    chatTitle.textContent = session.project_scope
+      ? `${session.title} · ${session.project_scope}`
+      : session.title;
     clearThread();
     await loadSessions();
   } catch (err) {
@@ -192,9 +198,10 @@ async function createNewSession() {
   }
 }
 
-function switchSession(sessionId, title) {
+function switchSession(sessionId, title, projectScope) {
   currentSessionId = sessionId;
-  chatTitle.textContent = title;
+  projectScopeInput.value = projectScope || '';
+  chatTitle.textContent = projectScope ? `${title} · ${projectScope}` : title;
   clearThread();
   loadSessions();
 }

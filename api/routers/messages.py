@@ -77,7 +77,11 @@ async def send_message(
     else:
         combined_context = retrieval_result.context
 
-    memory_result = retrieve_memories(body.content, session_id=session_id)
+    memory_result = retrieve_memories(
+        body.content,
+        session_id=session_id,
+        project_scope=session.get("project_scope"),
+    )
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
         combined_context = f"{combined_context}\n\n{memory_context}" if combined_context else memory_context

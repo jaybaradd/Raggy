@@ -15,11 +15,13 @@ from typing import Literal
 
 class CreateSessionRequest(BaseModel):
     title: str = Field(default="New chat", max_length=200)
+    project_scope: str | None = Field(default=None, max_length=200)
 
 
 class SessionResponse(BaseModel):
     session_id: str
     title: str
+    project_scope: str | None = None
     created_at: str
 
 

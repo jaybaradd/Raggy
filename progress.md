@@ -34,6 +34,11 @@
 - Added owner, scope, session/project, status, confirmation, and validity-window filters before semantic memory search.
 - Added separate memory context and `memories` SSE metadata so memory citations remain distinct from document sources.
 - Added frontend memory cards showing memory kind, scope, confidence, and memory ID separately from source citations.
+
+### ✅ [2026-09-08] Session project context
+
+- Added optional `project_scope` to session creation and session responses.
+- Passed session project context into memory retrieval so project-scoped memories are isolated to matching sessions.
 - Added conservative retrieval limits; graph storage and broad document-atom indexing remain deferred.
 
 ## Phase 1 — Evidence contracts and asynchronous ingestion

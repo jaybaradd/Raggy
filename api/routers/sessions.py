@@ -22,10 +22,11 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionResponse, status_code=201)
 def create_session(body: CreateSessionRequest) -> SessionResponse:
-    session = session_store.create_session(title=body.title)
+    session = session_store.create_session(title=body.title, project_scope=body.project_scope)
     return SessionResponse(
         session_id=session["session_id"],
         title=session["title"],
+        project_scope=session["project_scope"],
         created_at=session["created_at"],
     )
 
@@ -38,6 +39,7 @@ def list_sessions() -> SessionListResponse:
             SessionResponse(
                 session_id=s["session_id"],
                 title=s["title"],
+                project_scope=s["project_scope"],
                 created_at=s["created_at"],
             )
             for s in sessions
@@ -53,5 +55,6 @@ def get_session(session_id: str) -> SessionResponse:
     return SessionResponse(
         session_id=session["session_id"],
         title=session["title"],
+        project_scope=session["project_scope"],
         created_at=session["created_at"],
     )
