@@ -2,6 +2,40 @@
 
 ---
 
+## Phase 2 — Knowledge atoms and durable memory
+
+### ✅ [2026-09-08] Phase 2A memory foundation
+
+- Added typed `KnowledgeAtom`, `PreferenceMemory`, `SolutionMemory`, and `EntityMemory` payload models with a shared scoped/lifecycle-aware `MemoryRecord` envelope.
+- Added local SQLite `MemoryStore` with durable records, scope/status indexes, safe upsert, lifecycle transitions, and append-only audit events.
+- Added `MEMORY_DB_PATH` configuration; the repository remains replaceable by Postgres in a later Phase 2 slice.
+
+### ✅ [2026-09-08] Phase 2B structured extraction worker
+
+- Added a provider-neutral structured JSON extraction contract with typed payload validation and normalization.
+- Added an asynchronous post-turn extraction job; SSE completion is not blocked by memory extraction.
+- Added idempotency claims keyed by `source_turn_id` and extraction version, including failed/completed job status.
+- Persisted candidate memories with session scope, confidence, source turn, extractor version, and retrieved evidence references.
+- Added stable message IDs so completed assistant turns can be used as extraction provenance.
+- Memory retrieval remains planned for the next Phase 2 slice.
+
+### ✅ [2026-09-08] Phase 2C review and promotion APIs
+
+- Added candidate and filtered memory listing endpoints with owner isolation via `X-Owner-ID`.
+- Added confirm, reject, edit, expire, and explicit user/project promotion operations.
+- Added append-only audit details for review, edit, promotion, and supersession actions.
+- Added contradiction relationship records linking a superseded memory to its replacement; old records remain auditable and are excluded from active retrieval.
+- Expiration sets `status=expired` and `valid_to` rather than deleting source history.
+
+### ✅ [2026-09-08] Phase 2D memory retrieval projection
+
+- Added deterministic typed-memory text projection and a dedicated `kb_memory_records` Qdrant collection.
+- Active, confirmed memories are indexed; candidates, rejected, expired, and superseded records are removed from the projection.
+- Added owner, scope, session/project, status, confirmation, and validity-window filters before semantic memory search.
+- Added separate memory context and `memories` SSE metadata so memory citations remain distinct from document sources.
+- Added frontend memory cards showing memory kind, scope, confidence, and memory ID separately from source citations.
+- Added conservative retrieval limits; graph storage and broad document-atom indexing remain deferred.
+
 ## Phase 1 — Evidence contracts and asynchronous ingestion
 
 ### ✅ [2026-09-07] Phase 1 foundation slice

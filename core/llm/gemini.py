@@ -5,6 +5,7 @@ Uses google-genai's async streaming API.  The provider is constructed once and
 shared across requests (stateless — no per-request state is kept here).
 """
 
+import json
 from typing import AsyncIterator
 
 import google.genai as genai
@@ -62,6 +63,21 @@ class GeminiProvider(LLMProvider):
         ):
             if chunk.text:
                 yield chunk.text
+
+    async def generate_json(self, prompt: str, schema: dict) -> dict:
+        """Run one non-streaming structured generation request."""
+        config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+        )
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=config,
+        )
+        if getattr(response, "parsed", None) is not None:
+            return response.parsed
+        return json.loads(response.text)
 
 
 # Module-level singleton — import and use this object everywhere.

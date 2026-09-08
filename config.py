@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # "http://localhost:6333" → connect to a running Qdrant container
     qdrant_url: str = Field(default=":memory:", alias="QDRANT_URL")
     qdrant_collection: str = Field(default="kb_text_chunks", alias="QDRANT_COLLECTION")
+    memory_collection: str = Field(default="kb_memory_records", alias="MEMORY_COLLECTION")
 
     # ── Chunking ──────────────────────────────────────────────────────────────
     chunk_size_tokens: int = Field(default=512, alias="CHUNK_SIZE_TOKENS")
@@ -50,6 +51,7 @@ class Settings(BaseSettings):
     # ── Phase 1B — Multimodal ingestion ──────────────────────────────────────
     upload_dir: str = Field(default="./uploaded_files", alias="UPLOAD_DIR")
     metadata_db_path: str = Field(default="./raggy_metadata.sqlite3", alias="METADATA_DB_PATH")
+    memory_db_path: str = Field(default="./raggy_memory.sqlite3", alias="MEMORY_DB_PATH")
     whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
 

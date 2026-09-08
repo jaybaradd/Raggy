@@ -42,3 +42,7 @@ class LLMProvider(ABC):
             Individual text tokens/chunks from the model.
         """
         ...
+
+    async def generate_json(self, prompt: str, schema: dict) -> dict:
+        """Generate a schema-conforming JSON object for background extraction."""
+        raise NotImplementedError("This provider does not implement structured JSON generation")

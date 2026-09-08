@@ -21,13 +21,18 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from api.schemas import SendMessageRequest
 from core.llm.gemini import gemini_provider
+from core.memory.extractor import MemoryExtractor
+from core.memory.jobs import extract_turn_memories
+from core.storage.memory_store import memory_store
 from core.retrieval.engine import RAG_SYSTEM_PROMPT, build_rag_prompt, retrieve
+from core.retrieval.memory import retrieve_memories
 from db.session_store import session_store
 
 logger = logging.getLogger(__name__)
@@ -71,6 +76,11 @@ async def send_message(
             combined_context = f"[Attached file]\n{inline}"
     else:
         combined_context = retrieval_result.context
+
+    memory_result = retrieve_memories(body.content, session_id=session_id)
+    if memory_result.context:
+        memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
+        combined_context = f"{combined_context}\n\n{memory_context}" if combined_context else memory_context
 
     # Log what was retrieved so retrieval quality is visible in the terminal
     if inline:
@@ -121,7 +131,7 @@ async def send_message(
     ]
 
     return StreamingResponse(
-        _stream_response(session_id, messages, sources),
+        _stream_response(session_id, messages, sources, memory_result.memories, body.content),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -134,6 +144,8 @@ async def _stream_response(
     session_id: str,
     messages: list[dict],
     sources: list[dict],
+    memories: list[dict],
+    user_content: str,
 ):
     """
     Generator that yields SSE-formatted tokens and accumulates the full reply.
@@ -144,6 +156,7 @@ async def _stream_response(
         # Send structured provenance before token generation. Existing clients
         # can ignore this event and continue consuming token data events.
         yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+        yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'memories': memories})}\n\n"
         async for token in gemini_provider.chat_stream(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,
@@ -160,7 +173,18 @@ async def _stream_response(
 
     # Persist the complete assistant reply
     complete_reply = "".join(full_reply)
-    session_store.append_message(session_id, role="assistant", content=complete_reply)
+    assistant_turn_id = session_store.append_message(session_id, role="assistant", content=complete_reply)
+    evidence_refs = [source["evidence_id"] for source in sources if source.get("evidence_id")]
+    asyncio.create_task(extract_turn_memories(
+        store=memory_store,
+        extractor=MemoryExtractor(gemini_provider),
+        source_turn_id=assistant_turn_id,
+        session_id=session_id,
+        owner_id="default",
+        user_content=user_content,
+        assistant_content=complete_reply,
+        evidence_refs=evidence_refs,
+    ))
 
     # Signal end of stream
     yield "data: [DONE]\n\n"

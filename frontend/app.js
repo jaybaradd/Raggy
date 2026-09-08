@@ -247,6 +247,7 @@ async function sendMessage() {
     let buffer = '';
     let botText = '';
     let sourceMetadata = [];
+    let memoryMetadata = [];
 
     while (true) {
       const { done, value } = await reader.read();
@@ -264,6 +265,10 @@ async function sendMessage() {
             sourceMetadata = parsed.sources || [];
             continue;
           }
+          if (parsed && parsed.type === 'memories') {
+            memoryMetadata = parsed.memories || [];
+            continue;
+          }
           if (parsed && parsed.error) { botBubble.textContent = `⚠ Error: ${parsed.error}`; return; }
           const token = typeof parsed === 'string' ? parsed : (parsed.token || '');
           botText += token;
@@ -275,6 +280,7 @@ async function sendMessage() {
     }
     cursor.remove();
     renderSources(botBubble, sourceMetadata);
+    renderMemories(botBubble, memoryMetadata);
     scrollToBottom();
 
   } catch (err) {
@@ -284,6 +290,29 @@ async function sendMessage() {
     isStreaming = false;
     updateSendBtn();
   }
+}
+
+function renderMemories(botBubble, memories) {
+  if (!memories || memories.length === 0) return;
+  const container = document.createElement('div');
+  container.className = 'source-list memory-list';
+  const heading = document.createElement('div');
+  heading.className = 'source-list-heading';
+  heading.textContent = 'Memory used';
+  container.appendChild(heading);
+  memories.forEach((memory) => {
+    const card = document.createElement('div');
+    card.className = 'source-card memory-card';
+    const title = document.createElement('div');
+    title.className = 'source-card-title';
+    title.textContent = `${memory.kind || 'memory'} · ${memory.scope || 'session'}`;
+    const details = document.createElement('div');
+    details.className = 'source-card-details';
+    details.textContent = `confidence ${(Number(memory.confidence || 0) * 100).toFixed(0)}% · ${memory.memory_id || ''}`;
+    card.append(title, details);
+    container.appendChild(card);
+  });
+  botBubble.appendChild(container);
 }
 
 // ── File helpers ──────────────────────────────────────────────────────────────

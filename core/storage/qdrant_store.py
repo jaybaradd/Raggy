@@ -22,6 +22,7 @@ The client operates in two modes:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from qdrant_client import QdrantClient
@@ -29,6 +30,8 @@ from qdrant_client.http import models as qmodels
 
 from config import settings
 from core.ingestion.parser import ParsedChunk
+from core.memory.models import MemoryRecord
+from core.memory.projection import memory_text
 
 if TYPE_CHECKING:
     pass
@@ -248,12 +251,83 @@ class QdrantStore:
         results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return results[:k]
 
+    def _memory_store(self) -> "QdrantStore":
+        store = getattr(self, "_memory_collection_store", None)
+        if store is None:
+            store = QdrantStore(settings.memory_collection, client=self._client, bm25_encoder=self._bm25)
+            self._memory_collection_store = store
+        return store
+
+    def upsert_memory(self, record: MemoryRecord) -> None:
+        """Upsert an active confirmed memory projection; remove ineligible records."""
+        store = self._memory_store()
+        if record.status != "active" or not record.user_confirmed:
+            store.delete_memory(record.memory_id)
+            return
+        text = memory_text(record)
+        vector = embedder.encode([text])[0]
+        sparse = store._encode_sparse([text])[0]
+        store._client.upsert(collection_name=store._collection, points=[qmodels.PointStruct(
+            id=_chunk_id_to_int(record.memory_id),
+            vector={"dense": vector, _SPARSE_VECTOR_NAME: sparse},
+            payload={
+                "memory_id": record.memory_id, "memory_text": text, "kind": record.kind,
+                "owner_id": record.owner_id, "scope": record.scope,
+                "session_id": record.session_id, "project_scope": record.project_scope,
+                "status": record.status, "confidence": record.confidence,
+                "user_confirmed": record.user_confirmed, "source_turn_id": record.source_turn_id,
+                "evidence_refs": record.evidence_refs, "valid_from": record.valid_from.isoformat(),
+                "valid_to": record.valid_to.isoformat() if record.valid_to else None,
+            },
+        )])
+
+    def delete_memory(self, memory_id: str) -> None:
+        self._client.delete(collection_name=self._collection, points_selector=qmodels.PointIdsList(points=[_chunk_id_to_int(memory_id)]))
+
+    def search_memories(self, *, query_vector: list[float], query_text: str, owner_id: str,
+                        session_id: str, project_scope: str | None = None,
+                        top_k: int = 5) -> list[dict]:
+        """Search only active memories in scopes applicable to the current session."""
+        store = self._memory_store()
+        scope_filters = [("session", session_id), ("user", owner_id)]
+        if project_scope:
+            scope_filters.append(("project", project_scope))
+        hits: list[dict] = []
+        for scope, scope_value in scope_filters:
+            must = [
+                qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=owner_id)),
+                qmodels.FieldCondition(key="status", match=qmodels.MatchValue(value="active")),
+                qmodels.FieldCondition(key="user_confirmed", match=qmodels.MatchValue(value=True)),
+                qmodels.FieldCondition(key="scope", match=qmodels.MatchValue(value=scope)),
+            ]
+            if scope == "session":
+                must.append(qmodels.FieldCondition(key="session_id", match=qmodels.MatchValue(value=scope_value)))
+            elif scope == "project":
+                must.append(qmodels.FieldCondition(key="project_scope", match=qmodels.MatchValue(value=scope_value)))
+            query_filter = qmodels.Filter(must=must)
+            hits.extend(store.search(query_vector, query_text, top_k * 2, query_filter=query_filter))
+        unique = {hit["memory_id"]: hit for hit in hits}
+        now = datetime.now(timezone.utc)
+        eligible = []
+        for hit in unique.values():
+            try:
+                valid_from = datetime.fromisoformat(hit["valid_from"])
+                valid_to = datetime.fromisoformat(hit["valid_to"]) if hit.get("valid_to") else None
+                if valid_from > now or (valid_to is not None and valid_to <= now):
+                    continue
+            except (KeyError, ValueError):
+                logger.warning("Skipping memory with invalid validity metadata: %s", hit.get("memory_id"))
+                continue
+            eligible.append(hit)
+        return sorted(eligible, key=lambda hit: hit.get("score", 0.0), reverse=True)[:top_k]
+
     def search(
         self,
         query_vector: list[float],
         query_text: str,
         top_k: int | None = None,
         doc_id_filter: str | None = None,
+        query_filter: qmodels.Filter | None = None,
     ) -> list[dict]:
         """
         Hybrid search: dense + BM25 sparse, fused via Qdrant native RRF.
@@ -273,8 +347,7 @@ class QdrantStore:
         """
         k = top_k or settings.hybrid_candidates
 
-        query_filter: qmodels.Filter | None = None
-        if doc_id_filter:
+        if query_filter is None and doc_id_filter:
             query_filter = qmodels.Filter(
                 must=[
                     qmodels.FieldCondition(

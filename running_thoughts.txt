@@ -1,8 +1,35 @@
 start parsing the document as soon as it is uploaded
 
-Contextual retrieval prefixes.
-Separate OCR/caption/frame evidence for images.
-Visual embeddings.
-Video keyframe extraction and frame/transcript linking.
-Better frontend citation rendering.
-Golden retrieval evaluation sets.
+3 staged expiration of memory:
+Expiration flow
+Expiration should be a lifecycle state, not immediate deletion.
+active → expired
+When expired:
+status = "expired";
+valid_to is set;
+the memory is excluded from normal retrieval;
+an audit event records who or what expired it;
+the source evidence remains intact.
+There are three expiration paths:
+Explicit user expiration
+The user clicks “Forget this” or calls the expiry endpoint.
+This should be the primary mechanism for user memories.
+Temporal expiration
+Some claims naturally have a validity period:
+“The user is working on project X until June.”
+That can use:
+valid_from
+valid_to
+Retrieval checks whether the current time falls within that range.
+Policy-based expiration
+Useful for low-confidence or temporary records:
+unconfirmed session candidates can expire when the session closes;
+candidates can receive a configurable TTL, such as 30 days;
+project memories can expire when a project is archived;
+user preferences should not silently expire merely because they have not been used.
+For the first implementation, I would use:
+candidate session memories:
+  expire when the session is deleted or after a configurable TTL
+
+confirmed user/project memories:
+  expire only explicitly or through an explicit valid_to date

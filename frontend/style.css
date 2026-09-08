@@ -490,6 +490,10 @@ body {
   color: var(--text-secondary);
 }
 
+.memory-card {
+  border-left-color: var(--accent, #8b5cf6);
+}
+
 .source-card-title {
   color: var(--accent);
   font-weight: 500;

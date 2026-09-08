@@ -8,6 +8,7 @@ glance and avoids circular imports between routers.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
@@ -68,3 +69,22 @@ class YouTubeIngestRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     qdrant: dict
+
+
+# ── Memories ─────────────────────────────────────────────────────────────────
+
+class MemoryListResponse(BaseModel):
+    memories: list[dict]
+
+
+class MemoryPromotionRequest(BaseModel):
+    scope: Literal["user", "project"]
+    project_scope: str | None = Field(default=None, max_length=200)
+
+
+class MemoryEditRequest(BaseModel):
+    payload: dict
+
+
+class MemorySupersedeRequest(BaseModel):
+    replacement_memory_id: str
