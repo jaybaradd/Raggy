@@ -24,5 +24,6 @@ def retrieve_memories(query: str, *, owner_id: str = "default", session_id: str,
         return MemoryRetrievalResult(context="", memories=[])
     parts = []
     for index, memory in enumerate(hits, start=1):
-        parts.append(f"[Memory {index} | {memory.get('kind')} | {memory.get('scope')}]\n{memory.get('memory_text', '')}")
+        memory["prompt_label"] = f"M{index}"
+        parts.append(f"[{memory['prompt_label']} | {memory.get('kind')} | {memory.get('scope')}]\n{memory.get('memory_text', '')}")
     return MemoryRetrievalResult(context="\n\n".join(parts), memories=hits)

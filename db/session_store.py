@@ -18,6 +18,7 @@ from typing import TypedDict
 
 class Message(TypedDict):
     message_id: str
+    trace_id: str | None
     role: str        # "user" | "assistant"
     content: str
     created_at: str
@@ -65,7 +66,8 @@ class SessionStore:
             reverse=True,
         )
 
-    def append_message(self, session_id: str, role: str, content: str, attachments: list[dict] | None = None) -> str:
+    def append_message(self, session_id: str, role: str, content: str,
+                       attachments: list[dict] | None = None, trace_id: str | None = None) -> str:
         """Append a message to a session's history."""
         session = self._sessions.get(session_id)
         if session is None:
@@ -73,6 +75,7 @@ class SessionStore:
         message_id = str(uuid.uuid4())
         session["messages"].append({
             "message_id": message_id,
+            "trace_id": trace_id,
             "role": role,
             "content": content,
             "created_at": _now_iso(),

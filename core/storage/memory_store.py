@@ -69,7 +69,39 @@ class MemoryStore:
                     FOREIGN KEY(from_memory_id) REFERENCES memory_records(memory_id),
                     FOREIGN KEY(to_memory_id) REFERENCES memory_records(memory_id)
                 );
+                CREATE TABLE IF NOT EXISTS memory_access_events (
+                    access_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    message_id TEXT,
+                    memory_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    prompt_label TEXT,
+                    rank INTEGER,
+                    score REAL,
+                    details_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_access_trace
+                    ON memory_access_events(trace_id, event_type);
             """)
+
+    def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
+                            event_type: str, message_id: str | None = None,
+                            prompt_label: str | None = None, rank: int | None = None,
+                            score: float | None = None, details: dict | None = None) -> None:
+        """Record retrieval/injection now; attribution can be added later."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_access_events (
+                    trace_id, session_id, message_id, memory_id, event_type,
+                    prompt_label, rank, score, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (trace_id, session_id, message_id, memory_id, event_type, prompt_label,
+                 rank, score, json.dumps(details or {}, sort_keys=True), datetime.now(timezone.utc).isoformat()),
+            )
 
     def claim_extraction(self, source_turn_id: str, extraction_version: str) -> bool:
         """Claim a turn/version once; return False for an already completed/running job."""

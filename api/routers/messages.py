@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -61,7 +62,10 @@ async def send_message(
         raise HTTPException(status_code=404, detail="Session not found")
 
     # 1. Persist the user message
-    session_store.append_message(session_id, role="user", content=body.content)
+    trace_id = str(uuid4())
+    user_message_id = session_store.append_message(
+        session_id, role="user", content=body.content, trace_id=trace_id,
+    )
 
     # 2. Build context
     #    If the user attached a file inline, its parsed text comes in as inline_context.
@@ -85,6 +89,35 @@ async def send_message(
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
         combined_context = f"{combined_context}\n\n{memory_context}" if combined_context else memory_context
+
+    for rank, memory in enumerate(memory_result.memories, start=1):
+        logger.info(
+            "Memory trace %s: %s=%s rank=%d score=%.4f scope=%s",
+            trace_id, memory.get("prompt_label", "memory"), memory["memory_id"],
+            rank, float(memory.get("score") or 0.0), memory.get("scope"),
+        )
+        memory_store.record_access_event(
+            trace_id=trace_id,
+            session_id=session_id,
+            message_id=user_message_id,
+            memory_id=memory["memory_id"],
+            event_type="retrieved",
+            prompt_label=memory.get("prompt_label"),
+            rank=rank,
+            score=memory.get("score"),
+        )
+        memory_store.record_access_event(
+            trace_id=trace_id,
+            session_id=session_id,
+            message_id=user_message_id,
+            memory_id=memory["memory_id"],
+            event_type="injected",
+            prompt_label=memory.get("prompt_label"),
+            rank=rank,
+            score=memory.get("score"),
+        )
+    if memory_result.memories:
+        logger.info("Memory trace %s: retrieved and injected %d memories", trace_id, len(memory_result.memories))
 
     # Log what was retrieved so retrieval quality is visible in the terminal
     if inline:
@@ -135,7 +168,7 @@ async def send_message(
     ]
 
     return StreamingResponse(
-        _stream_response(session_id, messages, sources, memory_result.memories, body.content),
+        _stream_response(session_id, messages, sources, memory_result.memories, body.content, trace_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -150,6 +183,7 @@ async def _stream_response(
     sources: list[dict],
     memories: list[dict],
     user_content: str,
+    trace_id: str,
 ):
     """
     Generator that yields SSE-formatted tokens and accumulates the full reply.
@@ -159,8 +193,8 @@ async def _stream_response(
     try:
         # Send structured provenance before token generation. Existing clients
         # can ignore this event and continue consuming token data events.
-        yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
-        yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'memories': memories})}\n\n"
+        yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'trace_id': trace_id, 'sources': sources})}\n\n"
+        yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'trace_id': trace_id, 'memories': memories})}\n\n"
         async for token in gemini_provider.chat_stream(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,
@@ -177,7 +211,9 @@ async def _stream_response(
 
     # Persist the complete assistant reply
     complete_reply = "".join(full_reply)
-    assistant_turn_id = session_store.append_message(session_id, role="assistant", content=complete_reply)
+    assistant_turn_id = session_store.append_message(
+        session_id, role="assistant", content=complete_reply, trace_id=trace_id,
+    )
     evidence_refs = [source["evidence_id"] for source in sources if source.get("evidence_id")]
     asyncio.create_task(extract_turn_memories(
         store=memory_store,

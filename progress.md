@@ -34,6 +34,7 @@
 - Added owner, scope, session/project, status, confirmation, and validity-window filters before semantic memory search.
 - Added separate memory context and `memories` SSE metadata so memory citations remain distinct from document sources.
 - Added frontend memory cards showing memory kind, scope, confidence, and memory ID separately from source citations.
+- Added turn-level trace IDs, durable retrieval/injection access events, stable `M1`/`M2` prompt labels, and trace-aware memory SSE metadata. Model-use attribution remains intentionally deferred.
 
 ### ✅ [2026-09-08] Session project context
 
