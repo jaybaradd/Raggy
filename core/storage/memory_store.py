@@ -104,14 +104,26 @@ class MemoryStore:
             )
 
     def claim_extraction(self, source_turn_id: str, extraction_version: str) -> bool:
-        """Claim a turn/version once; return False for an already completed/running job."""
+        """Claim a turn/version, allowing failed jobs to be retried safely."""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO memory_extractions (source_turn_id, extraction_version, status, created_at, updated_at) VALUES (?, ?, 'running', ?, ?)",
                 (source_turn_id, extraction_version, now, now),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount == 1:
+                return True
+            existing = connection.execute(
+                "SELECT status FROM memory_extractions WHERE source_turn_id = ? AND extraction_version = ?",
+                (source_turn_id, extraction_version),
+            ).fetchone()
+            if existing and existing["status"] == "failed":
+                connection.execute(
+                    "UPDATE memory_extractions SET status = 'running', error = NULL, updated_at = ? WHERE source_turn_id = ? AND extraction_version = ?",
+                    (now, source_turn_id, extraction_version),
+                )
+                return True
+            return False
 
     def complete_extraction(self, source_turn_id: str, extraction_version: str, *, status: str,
                             error: str | None = None) -> None:

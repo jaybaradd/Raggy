@@ -26,6 +26,7 @@ const attachmentPreview  = document.getElementById('attachmentPreview');
 const attachmentName     = document.getElementById('attachmentName');
 const attachmentIcon     = document.getElementById('attachmentIcon');
 const attachmentRemove   = document.getElementById('attachmentRemove');
+const indexFileCheckbox  = document.getElementById('indexFileCheckbox');
 const ytPrompt           = document.getElementById('ytPrompt');
 const ytConfirm          = document.getElementById('ytConfirm');
 const ytDismiss          = document.getElementById('ytDismiss');
@@ -140,6 +141,7 @@ function setPendingFile(file) {
 
 function clearPendingFile() {
   pendingFile = null;
+  indexFileCheckbox.checked = false;
   attachmentPreview.hidden = true;
   updateSendBtn();
 }
@@ -212,13 +214,24 @@ async function sendMessage() {
   if ((!content && !pendingFile) || isStreaming) return;
   if (!currentSessionId) await createNewSession();
 
-  // Parse the attached file inline — don't ingest into Qdrant yet.
-  // The parsed text becomes inline_context for this chat turn.
+  // Attachments can be used once (inline) or saved to the knowledge base as
+  // well. Inline context keeps the current question fast and grounded; the
+  // optional upload makes the document available to future retrievals.
   let inlineContext = '';
   if (pendingFile) {
     const file = pendingFile;
+    const saveToKnowledgeBase = indexFileCheckbox.checked;
     clearPendingFile();
-    inlineContext = await parseFile(file);
+    if (saveToKnowledgeBase) {
+      // Docling uses native conversion components that can crash when the
+      // same document is parsed concurrently by /documents and /documents/parse.
+      // The indexed chunks will also serve the current question, so there is
+      // no need to parse the file a second time for inline context.
+      const indexed = await uploadFile(file);
+      if (!indexed) inlineContext = await parseFile(file);
+    } else {
+      inlineContext = await parseFile(file);
+    }
   }
 
   if (!content) return;   // file-only send with no text — nothing to ask
@@ -353,18 +366,20 @@ async function uploadFile(file) {
   try {
     const res = await fetch(`${API}/api/documents`, { method: 'POST', body: formData });
     const data = await res.json();
-    if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return; }
+    if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return false; }
     const status = data.status === 'processing'
       ? await waitForDocument(data.doc_id, file.name)
       : data;
     if (status.status === 'error') {
       showToast('❌', `Indexing failed: ${status.message || 'Unknown error'}`);
-      return;
+      return false;
     }
     showToast('✅', `Indexed ${status.chunk_count} chunks from "${file.name}"`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
+    return true;
   } catch (err) {
     showToast('❌', `Upload error: ${err.message}`);
+    return false;
   }
 }
 

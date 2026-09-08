@@ -64,12 +64,13 @@ class GeminiProvider(LLMProvider):
             if chunk.text:
                 yield chunk.text
 
-    async def generate_json(self, prompt: str, schema: dict) -> dict:
+    async def generate_json(self, prompt: str, schema: dict | None = None) -> dict:
         """Run one non-streaming structured generation request."""
-        config = genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-        )
+        # Gemini Developer API does not support every JSON Schema keyword
+        # emitted by Pydantic (notably ``additionalProperties``). Keep the
+        # response constrained to JSON here and validate it with Pydantic in
+        # the extraction layer instead of sending the incompatible schema.
+        config = genai_types.GenerateContentConfig(response_mime_type="application/json")
         response = await self._client.aio.models.generate_content(
             model=self._model,
             contents=prompt,
@@ -77,7 +78,7 @@ class GeminiProvider(LLMProvider):
         )
         if getattr(response, "parsed", None) is not None:
             return response.parsed
-        return json.loads(response.text)
+        return json.loads(response.text or "{}")
 
 
 # Module-level singleton — import and use this object everywhere.

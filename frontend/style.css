@@ -249,6 +249,21 @@ body {
   max-width: 320px;
 }
 
+.attachment-index-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.attachment-index-option input {
+  accent-color: var(--accent);
+}
+
 .attachment-name {
   white-space: nowrap;
   overflow: hidden;

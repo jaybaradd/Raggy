@@ -5,3 +5,7 @@ __pycache__/
 raggy_metadata.sqlite3
 raggy_metadata.sqlite3-shm
 raggy_metadata.sqlite3-wal
+raggy_memory.sqlite3
+raggy_memory.sqlite3-shm
+raggy_memory.sqlite3-wal
+qdrant_data/

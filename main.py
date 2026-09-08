@@ -5,7 +5,11 @@ Wires together all routers, configures structured JSON logging, and exposes
 a /health endpoint for basic liveness checks.
 
 Run with:
-    uvicorn main:app --reload --port 8000
+    uvicorn main:app --port 8000
+
+The local Qdrant backend uses a filesystem lock. Do not run this entrypoint
+with Uvicorn's reload mode: the reload supervisor and worker are separate
+processes and would both try to open the same local Qdrant directory.
 """
 
 from __future__ import annotations
@@ -78,4 +82,6 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Keep one process when using file-backed Qdrant. Reload mode creates a
+    # second interpreter on macOS and contends for qdrant_data/.lock.
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

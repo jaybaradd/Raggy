@@ -2,6 +2,20 @@
 
 ---
 
+### ✅ [2026-09-08] Attachment ingestion choice
+
+- Added a `Save to knowledge base` option to the file attachment preview.
+- Attachments remain available for immediate inline Q&A; when selected, the same file is also sent through asynchronous chunking, embedding, evidence persistence, and Qdrant indexing for future retrieval.
+- Kept the two paths explicit so one-off attachments do not become durable knowledge unintentionally.
+- Saved attachments now use their indexed chunks for the current question, avoiding a second concurrent Docling parse of the same file.
+
+### ✅ [2026-09-08] Local Qdrant startup lock fix
+
+- Disabled Uvicorn reload in the `python main.py` entrypoint because its macOS supervisor/worker processes contend for the file-backed Qdrant lock.
+- Updated startup documentation to use a single-process server for `QDRANT_URL=./qdrant_data`.
+
+---
+
 ## Phase 2 — Knowledge atoms and durable memory
 
 ### ✅ [2026-09-08] Phase 2A memory foundation
@@ -35,6 +49,10 @@
 - Added separate memory context and `memories` SSE metadata so memory citations remain distinct from document sources.
 - Added frontend memory cards showing memory kind, scope, confidence, and memory ID separately from source citations.
 - Added turn-level trace IDs, durable retrieval/injection access events, stable `M1`/`M2` prompt labels, and trace-aware memory SSE metadata. Model-use attribution remains intentionally deferred.
+- Fixed Gemini Developer API incompatibility with Pydantic `additionalProperties` schemas by using JSON MIME mode plus post-response validation; failed extraction jobs are now retryable.
+- Normalized common preference field variants into canonical `preferred_behavior` and isolated candidate validation so malformed document/entity candidates no longer discard valid preferences from the same turn.
+- Normalized nested preference payloads and human-readable values such as string conditions, `high` strength, and explicit consent.
+- Strengthened the extraction prompt with generic per-kind output examples, exact field contracts, atomic knowledge rules, evidence-ID constraints, and an explicit empty-result shape.
 
 ### ✅ [2026-09-08] Session project context
 

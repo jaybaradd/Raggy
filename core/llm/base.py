@@ -43,6 +43,6 @@ class LLMProvider(ABC):
         """
         ...
 
-    async def generate_json(self, prompt: str, schema: dict) -> dict:
+    async def generate_json(self, prompt: str, schema: dict | None = None) -> dict:
         """Generate a schema-conforming JSON object for background extraction."""
         raise NotImplementedError("This provider does not implement structured JSON generation")
