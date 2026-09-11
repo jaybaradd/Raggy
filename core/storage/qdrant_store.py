@@ -282,7 +282,19 @@ class QdrantStore:
         )])
 
     def delete_memory(self, memory_id: str) -> None:
-        self._client.delete(collection_name=self._collection, points_selector=qmodels.PointIdsList(points=[_chunk_id_to_int(memory_id)]))
+        """Delete a projection idempotently.
+
+        Local Qdrant raises KeyError when deleting an ID that was never
+        inserted, unlike the server implementation. Candidate memories are
+        deliberately never indexed, so that case is expected.
+        """
+        try:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=qmodels.PointIdsList(points=[_chunk_id_to_int(memory_id)]),
+            )
+        except KeyError:
+            logger.debug("Memory %s was not present in Qdrant projection", memory_id)
 
     def search_memories(self, *, query_vector: list[float], query_text: str, owner_id: str,
                         session_id: str, project_scope: str | None = None,

@@ -2,6 +2,43 @@
 
 ---
 
+### 📝 [2026-09-10] Hybrid memory architecture decision recorded
+
+- Documented the SQLite/Postgres + Qdrant + graph strategy, its advantages, and mitigations for graph noise, hallucinated relationships, duplication, contradictions, stale data, privacy leakage, projection inconsistency, and operational complexity in `Roadmap.md`.
+- Established that relational memory records remain authoritative while vector and graph stores remain scoped, specialized, rebuildable projections.
+
+### 🚧 [2026-09-10] Phase 2 graph-foundation implementation started
+
+- Added graph-compatible SQLite node, alias, and edge projections for active, confirmed memories.
+- Added conservative exact canonical/alias resolution, open normalized predicates, and broad relation-family classification while preserving the original atom semantics.
+- Added provenance kind, evidence references, confidence, scope, validity, and qualifiers to projected graph edges.
+- Added a durable SQLite projection outbox for Qdrant and graph synchronization, plus a rebuild script for derived projections.
+- Added graph inspection endpoints and deterministic tests for alias resolution, edge provenance, lifecycle deactivation, and outbox completion.
+- Deferred graph traversal/fusion, automatic contradiction decisions, durable sessions, and the Postgres migration to their planned follow-on slices.
+
+### ✅ [2026-09-10] Automatic project-event capture
+
+- Added `EventMemory` for user-stated operational facts such as shipments, deliveries, deadlines, meetings, and incidents.
+- Added deterministic project-capture policy: high-confidence events in a named project become active project memories automatically; generic knowledge, entities, solutions, and ambiguous claims remain candidates.
+- Added conservative event validity windows using the original user wording, with a default review window when no relative time is available.
+- Active project events now enter the existing Qdrant and graph projections; their graph edge retains source-turn provenance and temporal qualifiers.
+
+### ✅ [2026-09-10] Knowledge-base retrieval control
+
+- Added a per-message `Search knowledge base` toggle, disabled by default, so general and memory-oriented questions do not receive unrelated document context.
+- Added a matching API request flag; disabled retrieval bypasses document Qdrant search entirely while keeping scoped memory retrieval available.
+- Saving an attachment to the knowledge base enables the toggle for that message, preserving the expected indexed-document workflow.
+- Made local-Qdrant memory deletion idempotent so candidate-memory projection cleanup no longer fails when a point was never indexed.
+- Tightened post-chat extraction: assistant-only document summaries and citations are no longer eligible to become personal memory candidates.
+
+### ✅ [2026-09-10] Project membership clarity
+
+- Added a session project-update endpoint and made the sidebar's current-project control update the active chat explicitly.
+- New chats inherit the visible current project; the sidebar now groups chats under `Project · <name>` headings rather than only appending a project label to each title.
+- Passed session project context into post-turn candidate extraction so candidate provenance no longer loses the project that produced it.
+
+---
+
 ### ✅ [2026-09-08] Attachment ingestion choice
 
 - Added a `Save to knowledge base` option to the file attachment preview.
@@ -13,6 +50,19 @@
 
 - Disabled Uvicorn reload in the `python main.py` entrypoint because its macOS supervisor/worker processes contend for the file-backed Qdrant lock.
 - Updated startup documentation to use a single-process server for `QDRANT_URL=./qdrant_data`.
+
+### ✅ [2026-09-09] Phase 2E minimal memory acceptance slice
+
+- Added `evals/phase2e_conversations.json` with preference, session isolation, solution, contradiction, and provenance/expiration conversation scenarios.
+- Added deterministic lifecycle tests in `tests/test_phase2e_memory.py`; they run without Gemini, embeddings, or Qdrant.
+- Added opt-in real-API test `tests/test_phase2e_api_e2e.py` covering extraction, confirmation, project promotion, cross-session retrieval, SSE memory metadata, access events, and project isolation.
+- Fixed SQLite memory upserts so promotion correctly persists owner, scope, session, and project fields.
+- All four deterministic Phase 2E lifecycle tests pass; the real-API test runs when `RUN_PHASE2E_E2E=1` against a started server.
+- Verified the real API test against the running server: 1 end-to-end test passed in 12.037 seconds, covering extraction, confirmation, project promotion, cross-session retrieval, SSE memory metadata, access events, and project isolation.
+
+### ✅ Phase 2 exit criteria reached
+
+The narrow Phase 2 vertical slice is operational: a user preference becomes a candidate, is explicitly confirmed and promoted, is retrieved in a permitted later session, carries provenance/trace metadata, and is isolated from another project. Broader atom coverage and automated contradiction resolution remain future extensions rather than blockers for this phase.
 
 ---
 

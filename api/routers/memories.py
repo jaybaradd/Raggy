@@ -7,8 +7,9 @@ import logging
 from fastapi import APIRouter, Header, HTTPException
 
 from api.schemas import MemoryEditRequest, MemoryListResponse, MemoryPromotionRequest, MemorySupersedeRequest
+from core.memory.projections import sync_pending_projections
+from core.storage.graph_store import graph_store
 from core.storage.memory_store import memory_store
-from core.storage.qdrant_store import qdrant_store
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ def _owner(owner_id: str) -> str:
 def _sync_projection(record) -> None:
     """Projection failure must not roll back the authoritative memory change."""
     try:
-        qdrant_store.upsert_memory(record)
+        sync_pending_projections(store=memory_store)
     except Exception:
         logger.exception("Memory projection sync failed for %s", record.memory_id)
 
@@ -47,6 +48,26 @@ def _get(memory_id: str, owner_id: str):
     if record is None or record.owner_id != _owner(owner_id):
         raise HTTPException(status_code=404, detail="Memory not found")
     return record
+
+
+@router.get("/graph/nodes")
+def list_graph_nodes(owner_id: str = Header(default="default", alias="X-Owner-ID"),
+                     scope: str | None = None, project_scope: str | None = None):
+    """Inspect the rebuildable graph projection for the current owner."""
+    return {"nodes": graph_store.list_nodes(owner_id=_owner(owner_id), scope=scope, project_scope=project_scope)}
+
+
+@router.get("/graph/edges")
+def list_graph_edges(owner_id: str = Header(default="default", alias="X-Owner-ID"),
+                     scope: str | None = None, project_scope: str | None = None):
+    """Inspect active, provenance-linked graph edges for the current owner."""
+    return {"edges": graph_store.list_edges(owner_id=_owner(owner_id), scope=scope, project_scope=project_scope)}
+
+
+@router.get("/projections")
+def list_projection_jobs(owner_id: str = Header(default="default", alias="X-Owner-ID"),
+                         status: str | None = None):
+    return {"jobs": memory_store.list_projection_jobs(owner_id=_owner(owner_id), status=status)}
 
 
 @router.post("/{memory_id}/confirm")

@@ -101,11 +101,11 @@ Run asynchronously after ingestion and after relevant session turns:
 evidence segments + conversation turn
   → candidate atom extraction
   → schema validation
+  → deterministic retention policy
   → entity resolution / normalization
   → duplicate and contradiction detection
   → confidence and provenance attachment
-  → session memory
-  → optional promotion to project/user memory
+  → session candidate or active project/user memory
 ```
 
 Model-generated claims are candidates until supported by evidence or explicit user confirmation. Extraction never replaces source evidence.
@@ -119,7 +119,7 @@ class MemoryRecord:
     scope: Literal["session", "project", "user", "organization"]
     session_id: str | None
     project_scope: str | None
-    kind: Literal["knowledge", "preference", "solution", "entity"]
+    kind: Literal["knowledge", "preference", "solution", "entity", "event"]
     status: Literal["candidate", "active", "superseded", "rejected", "expired"]
     confidence: float
     user_confirmed: bool
@@ -140,12 +140,15 @@ Use typed payloads rather than one nullable schema:
 - `PreferenceMemory`: preferred behavior, scope, strength, consent, and applicability conditions.
 - `SolutionMemory`: problem signature, environment, steps, outcome, and verification evidence.
 - `EntityMemory`: canonical entity ID, type, aliases, and graph links.
+- `EventMemory`: user-stated operational event type, summary, entities, locations, and temporal scope.
 
 ### Memory lifecycle
 
 - Session records are private by default.
 - Candidate records require evidence and confidence thresholds.
 - Promotion to project/user scope is explicit, policy-driven, or user-confirmed.
+- Named projects use a transparent automatic-capture policy for high-confidence, user-stated operational events and explicit project preferences. Generic facts, entities, solutions, questions, rumours, assistant output, and document-only claims remain reviewable candidates until their dedicated policies exist.
+- Time-bound events receive a deterministic validity/review window derived from the user wording when possible; otherwise they receive a conservative default review window.
 - New claims supersede old claims only when subject, predicate, scope, and temporal context match.
 - Contradictions remain auditable; they are not silently deleted.
 - Preferences are injected through a relevance/scope policy, not dumped into every prompt.
@@ -157,6 +160,57 @@ Use typed payloads rather than one nullable schema:
 - Object storage: original assets and immutable extracted artifacts.
 - Qdrant: semantic projections of evidence and active memory records.
 - Graphiti/FalkorDB: entity nodes and temporal relationships, rebuildable from authoritative records.
+
+### Hybrid memory architecture decision
+
+Keep the memory system hybrid rather than selecting one storage mechanism for every workload:
+
+- SQLite during local development, replaceable by Postgres for durable authoritative memory records, scopes, lifecycle, ACLs, promotion decisions, contradictions, and audit history.
+- Qdrant for semantic projections of active, permitted memories and evidence; it is a retrieval accelerator, never the source of truth.
+- A graph projection for durable concept/entity nodes and typed relationships; it is rebuildable from authoritative memory and evidence records.
+
+Advantages:
+
+- Relational storage provides transactions, exact filtering, lifecycle control, provenance, and predictable permission checks.
+- Qdrant provides fuzzy natural-language recall when the user query does not match stored wording.
+- The graph provides multi-hop relationships, temporal structure, dependency traversal, and explainable connected context.
+- Each projection can be repaired or rebuilt independently without losing the underlying memory.
+
+Risks and mitigations:
+
+- Hallucinated or noisy relationships: retain raw claims and evidence in the authoritative store; project only validated/active memories; preserve confidence and review state.
+- Graph bloat: graph durable atoms and relationships, not every raw chunk or ephemeral conversation statement.
+- Duplicate entities/concepts: normalize aliases and external IDs; use conservative merges; retain unresolved candidates instead of silently merging.
+- Contradictory or stale facts: preserve both claims, add temporal validity and contradiction/supersession relationships, and exclude inactive projections from retrieval.
+- Privacy leakage: apply owner, project, session, status, and validity filters before both vector and graph retrieval; candidates remain private by default.
+- Projection inconsistency or graph-service failure: write the relational record first, synchronize projections asynchronously, retry failures, and support full rebuilds.
+- Operational complexity: begin with SQLite plus a local/rebuildable graph-compatible projection; introduce Postgres and Graphiti/FalkorDB only when scale or traversal needs justify them.
+
+Design rule: relational memory records remain authoritative; Qdrant and the graph are specialized, scoped, rebuildable projections.
+
+### Gap-bridging implementation sequence
+
+| Gap | Bridge | Delivery boundary |
+| --- | --- | --- |
+| SQLite is development-only | Keep repository interfaces and migrations SQLite-compatible; move the same schema to Postgres before multi-user deployment. | Postgres migration, not a blocker for local graph foundation. |
+| Sessions are in memory | Introduce durable session/message repositories alongside the Postgres migration. | Before multi-user deployment. |
+| No graph projection | Add graph-compatible node, alias, edge, and projection-job tables to the authoritative store. | Phase 2 graph foundation. |
+| Basic normalization only | Add conservative exact canonical/alias/external-ID resolution; ambiguous names remain separate candidates. | Phase 2 graph foundation. |
+| Atoms are disconnected strings | Project active knowledge atoms into provenance-linked graph edges between resolved nodes. | Phase 2 graph foundation. |
+| No generic relationship model | Preserve an open normalized predicate plus a controlled broad relation family and qualifiers. | Phase 2 graph foundation. |
+| Manual contradictions | Add deterministic same-subject/predicate/scope conflict candidates; retain human confirmation for supersession. | Phase 2 graph foundation, automated resolution later. |
+| Projection sync is best effort | Persist projection jobs in the same transaction as memory changes; retry and rebuild projections independently. | Phase 2 graph foundation. |
+| Incomplete provenance | Record provenance kind (`conversation`, `evidence`, `inferred`) and require source turn and/or evidence references. | Phase 2 graph foundation. |
+| Vector-only retrieval | Retain vector retrieval; add graph neighborhood/traversal and fusion only after the graph is populated. | Phase 3 retrieval and reasoning. |
+
+Implementation order:
+
+1. Add graph-compatible authoritative schema and a deterministic resolver.
+2. Project active memory records into nodes and generic edges, including provenance and temporal qualifiers.
+3. Add a durable projection outbox, retries, status inspection, and rebuild support.
+4. Add contradiction candidate detection and review APIs.
+5. Add durable sessions/messages with the Postgres migration.
+6. Add graph/vector fused retrieval and multi-hop planning in Phase 3.
 
 ### Exit criteria
 

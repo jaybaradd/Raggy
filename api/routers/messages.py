@@ -32,7 +32,7 @@ from core.llm.gemini import gemini_provider
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
 from core.storage.memory_store import memory_store
-from core.retrieval.engine import RAG_SYSTEM_PROMPT, build_rag_prompt, retrieve
+from core.retrieval.engine import RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve
 from core.retrieval.memory import retrieve_memories
 from db.session_store import session_store
 
@@ -71,7 +71,11 @@ async def send_message(
     #    If the user attached a file inline, its parsed text comes in as inline_context.
     #    That content is the primary source for this turn — prepend it before retrieval results.
     inline = body.inline_context.strip()
-    retrieval_result = retrieve(query=body.content)
+    if body.use_knowledge_base:
+        retrieval_result = retrieve(query=body.content)
+    else:
+        retrieval_result = RetrievalResult(context="", chunks=[])
+        logger.info("Knowledge-base retrieval disabled for query %r", body.content[:80])
 
     if inline:
         if retrieval_result.context:
@@ -168,7 +172,15 @@ async def send_message(
     ]
 
     return StreamingResponse(
-        _stream_response(session_id, messages, sources, memory_result.memories, body.content, trace_id),
+        _stream_response(
+            session_id=session_id,
+            project_scope=session.get("project_scope"),
+            messages=messages,
+            sources=sources,
+            memories=memory_result.memories,
+            user_content=body.content,
+            trace_id=trace_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -179,6 +191,7 @@ async def send_message(
 
 async def _stream_response(
     session_id: str,
+    project_scope: str | None,
     messages: list[dict],
     sources: list[dict],
     memories: list[dict],
@@ -220,6 +233,7 @@ async def _stream_response(
         extractor=MemoryExtractor(gemini_provider),
         source_turn_id=assistant_turn_id,
         session_id=session_id,
+        project_scope=project_scope,
         owner_id="default",
         user_content=user_content,
         assistant_content=complete_reply,

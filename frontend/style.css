@@ -138,6 +138,12 @@ body {
   border-color: var(--border-focus);
 }
 
+.project-field small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -145,6 +151,19 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.project-group-heading {
+  margin: 10px 7px 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.project-group-heading:first-child {
+  margin-top: 2px;
 }
 
 .session-item {
@@ -633,6 +652,21 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   text-align: center;
+}
+
+.knowledge-base-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.knowledge-base-toggle input {
+  accent-color: var(--accent);
 }
 
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */

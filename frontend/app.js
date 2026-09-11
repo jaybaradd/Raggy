@@ -27,6 +27,7 @@ const attachmentName     = document.getElementById('attachmentName');
 const attachmentIcon     = document.getElementById('attachmentIcon');
 const attachmentRemove   = document.getElementById('attachmentRemove');
 const indexFileCheckbox  = document.getElementById('indexFileCheckbox');
+const knowledgeBaseToggle = document.getElementById('knowledgeBaseToggle');
 const ytPrompt           = document.getElementById('ytPrompt');
 const ytConfirm          = document.getElementById('ytConfirm');
 const ytDismiss          = document.getElementById('ytDismiss');
@@ -40,6 +41,7 @@ const ytDismiss          = document.getElementById('ytDismiss');
 // ── Events ────────────────────────────────────────────────────────────────────
 function bindEvents() {
   newChatBtn.addEventListener('click', createNewSession);
+  projectScopeInput.addEventListener('change', saveCurrentSessionProject);
   sendBtn.addEventListener('click', sendMessage);
   toastClose.addEventListener('click', () => { uploadStatus.hidden = true; });
 
@@ -168,14 +170,30 @@ function renderSessionList(sessions) {
     sessionList.innerHTML = `<p style="color:var(--text-muted);font-size:12px;padding:8px 12px;">No sessions yet</p>`;
     return;
   }
+  const groups = new Map();
   sessions.forEach(session => {
-    const el = document.createElement('div');
-    el.className = 'session-item' + (session.session_id === currentSessionId ? ' active' : '');
-    el.textContent = session.project_scope ? `${session.title} · ${session.project_scope}` : session.title;
-    el.dataset.id = session.session_id;
-    el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope));
-    sessionList.appendChild(el);
+    const project = session.project_scope || '';
+    if (!groups.has(project)) groups.set(project, []);
+    groups.get(project).push(session);
   });
+
+  [...groups.entries()]
+    .sort(([a], [b]) => (a || 'zzzz').localeCompare(b || 'zzzz'))
+    .forEach(([project, projectSessions]) => {
+      const heading = document.createElement('div');
+      heading.className = 'project-group-heading';
+      heading.textContent = project ? `Project · ${project}` : 'Personal chats';
+      sessionList.appendChild(heading);
+
+      projectSessions.forEach(session => {
+        const el = document.createElement('div');
+        el.className = 'session-item' + (session.session_id === currentSessionId ? ' active' : '');
+        el.textContent = session.title;
+        el.dataset.id = session.session_id;
+        el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope));
+        sessionList.appendChild(el);
+      });
+    });
 }
 
 async function createNewSession() {
@@ -208,6 +226,27 @@ function switchSession(sessionId, title, projectScope) {
   loadSessions();
 }
 
+async function saveCurrentSessionProject() {
+  if (!currentSessionId) return;
+  const projectScope = projectScopeInput.value.trim() || null;
+  try {
+    const res = await fetch(`${API}/api/sessions/${currentSessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_scope: projectScope }),
+    });
+    if (!res.ok) throw new Error('Could not update project');
+    const session = await res.json();
+    projectScopeInput.value = session.project_scope || '';
+    chatTitle.textContent = session.project_scope
+      ? `${session.title} · ${session.project_scope}`
+      : session.title;
+    await loadSessions();
+  } catch (err) {
+    console.error('Failed to update project:', err);
+  }
+}
+
 // ── Send message ──────────────────────────────────────────────────────────────
 async function sendMessage() {
   const content = messageInput.value.trim();
@@ -228,7 +267,8 @@ async function sendMessage() {
       // The indexed chunks will also serve the current question, so there is
       // no need to parse the file a second time for inline context.
       const indexed = await uploadFile(file);
-      if (!indexed) inlineContext = await parseFile(file);
+      if (indexed) knowledgeBaseToggle.checked = true;
+      else inlineContext = await parseFile(file);
     } else {
       inlineContext = await parseFile(file);
     }
@@ -253,7 +293,11 @@ async function sendMessage() {
     const res = await fetch(`${API}/api/sessions/${currentSessionId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, inline_context: inlineContext }),
+      body: JSON.stringify({
+        content,
+        inline_context: inlineContext,
+        use_knowledge_base: knowledgeBaseToggle.checked,
+      }),
     });
 
     if (!res.ok) {

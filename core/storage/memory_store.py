@@ -10,7 +10,7 @@ from threading import Lock
 
 from config import settings
 from core.memory.models import (
-    EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
+    EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
     PreferenceMemory, SolutionMemory,
 )
 
@@ -84,6 +84,20 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_access_trace
                     ON memory_access_events(trace_id, event_type);
+                CREATE TABLE IF NOT EXISTS memory_projection_jobs (
+                    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    memory_id TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(memory_id, target),
+                    FOREIGN KEY(memory_id) REFERENCES memory_records(memory_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_projection_jobs_pending
+                    ON memory_projection_jobs(status, updated_at);
             """)
 
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
@@ -147,6 +161,8 @@ class MemoryStore:
                     payload_json, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
+                    owner_id=excluded.owner_id, scope=excluded.scope,
+                    session_id=excluded.session_id, project_scope=excluded.project_scope,
                     status=excluded.status, confidence=excluded.confidence,
                     user_confirmed=excluded.user_confirmed, evidence_refs_json=excluded.evidence_refs_json,
                     valid_to=excluded.valid_to, superseded_by=excluded.superseded_by,
@@ -156,6 +172,92 @@ class MemoryStore:
                 "INSERT INTO memory_audit_events (memory_id, event_type, actor_id, details_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (record.memory_id, event_type, actor_id, json.dumps(details or {}, sort_keys=True), now.isoformat()),
             )
+            self._enqueue_projection_locked(connection, record.memory_id, "qdrant", now.isoformat())
+            self._enqueue_projection_locked(connection, record.memory_id, "graph", now.isoformat())
+
+    @staticmethod
+    def _enqueue_projection_locked(connection: sqlite3.Connection, memory_id: str,
+                                   target: str, now: str) -> None:
+        """Queue a repairable projection update in the same transaction as the record."""
+        connection.execute(
+            """
+            INSERT INTO memory_projection_jobs (
+                memory_id, target, status, attempts, error, created_at, updated_at
+            ) VALUES (?, ?, 'pending', 0, NULL, ?, ?)
+            ON CONFLICT(memory_id, target) DO UPDATE SET
+                status='pending', error=NULL, updated_at=excluded.updated_at
+            """,
+            (memory_id, target, now, now),
+        )
+
+    def claim_projection_jobs(self, *, limit: int = 50) -> list[dict]:
+        """Claim pending projection work. Failed jobs are retried by re-enqueueing a record."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM memory_projection_jobs WHERE status = 'pending' ORDER BY updated_at LIMIT ?", (limit,)
+            ).fetchall()
+            jobs = [dict(row) for row in rows]
+            for job in jobs:
+                connection.execute(
+                    "UPDATE memory_projection_jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE job_id = ?",
+                    (now, job["job_id"]),
+                )
+        return jobs
+
+    def complete_projection_job(self, job_id: int) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE memory_projection_jobs SET status = 'completed', error = NULL, updated_at = ? WHERE job_id = ?",
+                (datetime.now(timezone.utc).isoformat(), job_id),
+            )
+
+    def fail_projection_job(self, job_id: int, error: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE memory_projection_jobs SET status = 'failed', error = ?, updated_at = ? WHERE job_id = ?",
+                (error, datetime.now(timezone.utc).isoformat(), job_id),
+            )
+
+    def requeue_failed_projections(self) -> int:
+        """Make failed projection work retryable without mutating authoritative memories."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE memory_projection_jobs SET status = 'pending', error = NULL, updated_at = ? WHERE status = 'failed'",
+                (now,),
+            )
+        return cursor.rowcount
+
+    def enqueue_all_projections(self) -> int:
+        """Schedule a full rebuild of derived graph and vector projections."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            memory_ids = [row["memory_id"] for row in connection.execute(
+                "SELECT memory_id FROM memory_records"
+            ).fetchall()]
+            for memory_id in memory_ids:
+                self._enqueue_projection_locked(connection, memory_id, "qdrant", now)
+                self._enqueue_projection_locked(connection, memory_id, "graph", now)
+        return len(memory_ids)
+
+    def list_projection_jobs(self, *, owner_id: str, status: str | None = None,
+                             limit: int = 100) -> list[dict]:
+        clauses = ["records.owner_id = ?"]
+        params: list[object] = [owner_id]
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT jobs.* FROM memory_projection_jobs AS jobs
+                    JOIN memory_records AS records ON records.memory_id = jobs.memory_id
+                    {where.replace('status', 'jobs.status')}
+                    ORDER BY jobs.updated_at DESC LIMIT ?""",
+                [*params, limit],
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection:
@@ -228,7 +330,8 @@ class MemoryStore:
     def edit(self, memory_id: str, payload: dict, *, actor_id: str = "default") -> MemoryRecord:
         record = self._owned(memory_id, actor_id)
         payload_types = {"knowledge": KnowledgeAtom, "preference": PreferenceMemory,
-                         "solution": SolutionMemory, "entity": EntityMemory}
+                         "solution": SolutionMemory, "entity": EntityMemory,
+                         "event": EventMemory}
         parsed = payload_types[record.kind].model_validate(payload)
         record.payload = parsed
         self.upsert(record, event_type="edited", actor_id=actor_id)

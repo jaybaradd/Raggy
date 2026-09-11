@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-MemoryKind = Literal["knowledge", "preference", "solution", "entity"]
+MemoryKind = Literal["knowledge", "preference", "solution", "entity", "event"]
 MemoryScope = Literal["session", "project", "user", "organization"]
 MemoryStatus = Literal["candidate", "active", "superseded", "rejected", "expired"]
 
@@ -48,7 +48,18 @@ class EntityMemory(BaseModel):
     graph_links: list[str] = Field(default_factory=list)
 
 
-MemoryPayload = Union[KnowledgeAtom, PreferenceMemory, SolutionMemory, EntityMemory]
+class EventMemory(BaseModel):
+    """A user-stated, time-bound project event such as a shipment or deadline."""
+
+    model_config = ConfigDict(extra="forbid")
+    event_type: str = Field(min_length=1, max_length=500)
+    summary: str = Field(min_length=1, max_length=4_000)
+    entities: list[str] = Field(default_factory=list, max_length=20)
+    locations: list[str] = Field(default_factory=list, max_length=20)
+    temporal_scope: str | None = Field(default=None, max_length=500)
+
+
+MemoryPayload = Union[KnowledgeAtom, PreferenceMemory, SolutionMemory, EntityMemory, EventMemory]
 
 
 class MemoryRecord(BaseModel):
@@ -76,7 +87,8 @@ class MemoryRecord(BaseModel):
     @model_validator(mode="after")
     def validate_kind_payload(self) -> "MemoryRecord":
         expected = {"knowledge": KnowledgeAtom, "preference": PreferenceMemory,
-                    "solution": SolutionMemory, "entity": EntityMemory}[self.kind]
+                    "solution": SolutionMemory, "entity": EntityMemory,
+                    "event": EventMemory}[self.kind]
         if not isinstance(self.payload, expected):
             raise ValueError(f"kind '{self.kind}' requires {expected.__name__} payload")
         if self.scope == "session" and not self.session_id:

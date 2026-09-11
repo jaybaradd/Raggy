@@ -59,6 +59,14 @@ class SessionStore:
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
+    def update_project_scope(self, session_id: str, project_scope: str | None) -> Session:
+        """Assign a session to a project, or remove its project assignment."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"Session '{session_id}' not found")
+        session["project_scope"] = project_scope
+        return session
+
     def list_sessions(self) -> list[Session]:
         return sorted(
             self._sessions.values(),

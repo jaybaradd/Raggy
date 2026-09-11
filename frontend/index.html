@@ -27,8 +27,9 @@
           New chat
         </button>
         <label class="project-field" for="projectScopeInput">
-          <span>Project (optional)</span>
-          <input id="projectScopeInput" type="text" maxlength="200" placeholder="e.g. raggy" />
+          <span>Current project</span>
+          <input id="projectScopeInput" type="text" maxlength="200" placeholder="Personal chats" />
+          <small>New chats inherit this project. Changing it moves this chat.</small>
         </label>
       </div>
 
@@ -116,6 +117,10 @@
             </svg>
           </button>
         </div>
+        <label class="knowledge-base-toggle" title="Use indexed documents as context for this message">
+          <input type="checkbox" id="knowledgeBaseToggle" />
+          <span>Search knowledge base</span>
+        </label>
         <p class="input-hint">Raggy may make mistakes. Verify important information.</p>
       </div>
 

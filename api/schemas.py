@@ -18,6 +18,10 @@ class CreateSessionRequest(BaseModel):
     project_scope: str | None = Field(default=None, max_length=200)
 
 
+class UpdateSessionRequest(BaseModel):
+    project_scope: str | None = Field(default=None, max_length=200)
+
+
 class SessionResponse(BaseModel):
     session_id: str
     title: str
@@ -34,6 +38,7 @@ class SessionListResponse(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=32_000)
     inline_context: str = Field(default="")  # parsed content of a chat-attached file (bypasses retrieval)
+    use_knowledge_base: bool = Field(default=False)
     attachments: list[dict] = Field(default_factory=list)  # stub for Phase 3 inline multimodal
 
 

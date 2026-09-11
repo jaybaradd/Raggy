@@ -1,0 +1,69 @@
+[
+  {
+    "id": "preference_project_promotion",
+    "turns": [
+      {"role": "user", "content": "For this project, end every answer with the phrase 'chill out'. Please remember that."},
+      {"role": "assistant", "content": "Understood. I will apply that preference for this project after you confirm it."}
+    ],
+    "expected": {
+      "kind": "preference",
+      "initial_scope": "session",
+      "initial_status": "candidate",
+      "promoted_scope": "project",
+      "project_scope": "phase2e-demo",
+      "relevant_query": "Answer my project question",
+      "preferred_behavior": "end every answer with the phrase 'chill out'"
+    }
+  },
+  {
+    "id": "session_scope_isolation",
+    "turns": [
+      {"role": "user", "content": "For this chat only, call the draft plan Alpha."},
+      {"role": "assistant", "content": "I will use Alpha in this chat."}
+    ],
+    "expected": {
+      "kind": "preference",
+      "initial_scope": "session",
+      "other_session_must_not_retrieve": true
+    }
+  },
+  {
+    "id": "solution_retrieval",
+    "turns": [
+      {"role": "user", "content": "When Docling crashes because two conversions overlap, run one ingestion at a time and use indexed chunks for the current question."},
+      {"role": "assistant", "content": "That solved the local ingestion crash."}
+    ],
+    "expected": {
+      "kind": "solution",
+      "problem_signature": "concurrent Docling conversion crash",
+      "relevant_future_query": "How should I handle a Docling conversion crash caused by overlapping jobs?",
+      "requires_environment_and_evidence": true
+    }
+  },
+  {
+    "id": "contradiction_and_supersession",
+    "turns": [
+      {"role": "user", "content": "My preferred response ending is 'chill out'."},
+      {"role": "user", "content": "Correction: my preferred response ending is now 'stay curious'."}
+    ],
+    "expected": {
+      "kind": "preference",
+      "old_record_must_be": "superseded",
+      "replacement_must_be": "active",
+      "relationship": "contradiction"
+    }
+  },
+  {
+    "id": "provenance_and_expiration",
+    "turns": [
+      {"role": "user", "content": "Remember that this temporary preference applies only until the end of this project."},
+      {"role": "assistant", "content": "I will retain it only for the stated project lifetime."}
+    ],
+    "expected": {
+      "requires_source_turn_id": true,
+      "requires_memory_id": true,
+      "requires_scope_and_evidence_metadata": true,
+      "can_expire_without_deleting_history": true
+    }
+  }
+]

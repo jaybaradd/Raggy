@@ -1,5 +1,5 @@
 """Typed memory records used by Phase 2."""
 
-from .models import EntityMemory, KnowledgeAtom, MemoryRecord, PreferenceMemory, SolutionMemory
+from .models import EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, PreferenceMemory, SolutionMemory
 
-__all__ = ["EntityMemory", "KnowledgeAtom", "MemoryRecord", "PreferenceMemory", "SolutionMemory"]
+__all__ = ["EventMemory", "EntityMemory", "KnowledgeAtom", "MemoryRecord", "PreferenceMemory", "SolutionMemory"]

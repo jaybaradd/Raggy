@@ -9,15 +9,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.llm.base import LLMProvider
-from core.memory.models import EntityMemory, KnowledgeAtom, PreferenceMemory, SolutionMemory
+from core.memory.models import EventMemory, EntityMemory, KnowledgeAtom, PreferenceMemory, SolutionMemory
 
-EXTRACTION_VERSION = "phase2b-v2"
+EXTRACTION_VERSION = "phase2b-v3"
 logger = logging.getLogger(__name__)
 
 
 class MemoryCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["knowledge", "preference", "solution", "entity"]
+    kind: Literal["knowledge", "preference", "solution", "entity", "event"]
     confidence: float = Field(ge=0.0, le=1.0)
     payload: dict
     evidence_refs: list[str] = Field(default_factory=list)
@@ -33,6 +33,7 @@ _PAYLOAD_TYPES = {
     "preference": PreferenceMemory,
     "solution": SolutionMemory,
     "entity": EntityMemory,
+    "event": EventMemory,
 }
 
 
@@ -81,6 +82,8 @@ Allowed candidate shapes:
   `steps` (array of strings), `outcome` (string or null), `verification_evidence` (array of strings).
 - entity payload: `canonical_name` (string), `entity_type` (string), `aliases` (array of strings),
   `external_ids` (object of strings), `graph_links` (array of strings).
+- event payload: `event_type` (string), `summary` (string), `entities` (array of strings),
+  `locations` (array of strings), `temporal_scope` (string or null).
 
 Representative output examples (do not copy their content):
 {{
@@ -131,16 +134,31 @@ Representative output examples (do not copy their content):
         "graph_links": []
       }},
       "evidence_refs": ["evidence-id-from-input"]
+    }},
+    {{
+      "kind": "event",
+      "confidence": 0.9,
+      "payload": {{
+        "event_type": "shipment",
+        "summary": "A shipment is arriving by air cargo from a named city",
+        "entities": ["shipment", "air cargo"],
+        "locations": ["a named city"],
+        "temporal_scope": "in two days"
+      }},
+      "evidence_refs": []
     }}
   ]
 }}
 
 Rules:
 - Extract only explicit statements or claims directly supported by the turn/evidence.
+- For conversation memory, extract only durable statements made or explicitly adopted by the USER. Do not turn facts that appear only in the assistant answer, retrieved documents, or citations into personal memory candidates.
+- Document-derived knowledge atoms belong to the document-ingestion pipeline, not this post-chat user-memory extraction job.
 - Create one atomic subject-predicate-object claim per knowledge candidate; never put a nested resume, profile, list, or document object in a payload.
+- Use `event` only for concrete, user-stated operational events such as shipments, deliveries, meetings, deadlines, reservations, or incidents. Do not use it for a question, a rumour, or a fact found only in documents.
 - Use only the exact field names above. Do not wrap a payload inside another kind-named object.
 - `evidence_refs` may contain only these IDs: {json.dumps(evidence_refs)}. Use [] when there is no evidence reference.
-- Candidates are session-scoped and unconfirmed by default; do not output scope or status fields.
+- Do not output scope or status fields; application policy decides whether a validated user-stated candidate remains session-scoped or becomes active project memory.
 - If no valid candidate can be formed, return {{"candidates": []}}.
 
 Session: {session_id}
