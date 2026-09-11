@@ -77,6 +77,7 @@ class MemoryRecord(BaseModel):
     source_turn_id: str | None = None
     extraction_model: str = ""
     extraction_version: str = ""
+    identity_key: str | None = None
     valid_from: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     valid_to: datetime | None = None
     superseded_by: str | None = None

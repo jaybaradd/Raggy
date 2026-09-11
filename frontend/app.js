@@ -14,7 +14,8 @@ const sessionList        = document.getElementById('sessionList');
 const chatTitle          = document.getElementById('chatTitle');
 const projectScopeInput  = document.getElementById('projectScopeInput');
 const messageThread      = document.getElementById('messageThread');
-const emptyState         = document.getElementById('emptyState');
+let emptyState           = document.getElementById('emptyState');
+const emptyStateTemplate = emptyState.cloneNode(true);
 const messageInput       = document.getElementById('messageInput');
 const sendBtn            = document.getElementById('sendBtn');
 const fileInput          = document.getElementById('fileInput');
@@ -218,12 +219,37 @@ async function createNewSession() {
   }
 }
 
-function switchSession(sessionId, title, projectScope) {
+async function switchSession(sessionId, title, projectScope) {
   currentSessionId = sessionId;
   projectScopeInput.value = projectScope || '';
   chatTitle.textContent = projectScope ? `${title} · ${projectScope}` : title;
   clearThread();
-  loadSessions();
+  await Promise.all([loadSessionMessages(sessionId), loadSessions()]);
+}
+
+async function loadSessionMessages(sessionId) {
+  try {
+    const res = await fetch(`${API}/api/sessions/${sessionId}/messages`);
+    if (!res.ok) throw new Error('Could not load chat history');
+    const data = await res.json();
+    // A user can click another chat while this request is in flight.
+    if (currentSessionId !== sessionId) return;
+
+    const messages = data.messages || [];
+    if (messages.length === 0) {
+      clearThread();
+      return;
+    }
+    messageThread.innerHTML = '';
+    emptyState = null;
+    messages.forEach(message => {
+      appendBubble(message.role === 'assistant' ? 'bot' : 'user', message.content);
+    });
+    scrollToBottom();
+  } catch (err) {
+    console.error('Failed to load chat history:', err);
+    if (currentSessionId === sessionId) clearThread();
+  }
 }
 
 async function saveCurrentSessionProject() {
@@ -518,18 +544,17 @@ function appendBubble(role, text) {
 
 function clearThread() {
   messageThread.innerHTML = '';
-  if (emptyState) {
-    const clone = emptyState.cloneNode(true);
-    clone.style.display = '';
-    messageThread.appendChild(clone);
-    clone.querySelectorAll('.chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        messageInput.value = chip.dataset.prompt;
-        messageInput.dispatchEvent(new Event('input'));
-        sendMessage();
-      });
+  const clone = emptyStateTemplate.cloneNode(true);
+  clone.style.display = '';
+  messageThread.appendChild(clone);
+  emptyState = clone;
+  clone.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      messageInput.value = chip.dataset.prompt;
+      messageInput.dispatchEvent(new Event('input'));
+      sendMessage();
     });
-  }
+  });
 }
 
 function scrollToBottom() { messageThread.scrollTop = messageThread.scrollHeight; }

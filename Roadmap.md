@@ -193,12 +193,12 @@ Design rule: relational memory records remain authoritative; Qdrant and the grap
 | Gap | Bridge | Delivery boundary |
 | --- | --- | --- |
 | SQLite is development-only | Keep repository interfaces and migrations SQLite-compatible; move the same schema to Postgres before multi-user deployment. | Postgres migration, not a blocker for local graph foundation. |
-| Sessions are in memory | Introduce durable session/message repositories alongside the Postgres migration. | Before multi-user deployment. |
+| Sessions are in memory | Use the new SQLite session/message repository locally; migrate the same repository contract and schema to Postgres before multi-user deployment. | Durable local sessions complete; Postgres migration remains pending. |
 | No graph projection | Add graph-compatible node, alias, edge, and projection-job tables to the authoritative store. | Phase 2 graph foundation. |
 | Basic normalization only | Add conservative exact canonical/alias/external-ID resolution; ambiguous names remain separate candidates. | Phase 2 graph foundation. |
 | Atoms are disconnected strings | Project active knowledge atoms into provenance-linked graph edges between resolved nodes. | Phase 2 graph foundation. |
 | No generic relationship model | Preserve an open normalized predicate plus a controlled broad relation family and qualifiers. | Phase 2 graph foundation. |
-| Manual contradictions | Add deterministic same-subject/predicate/scope conflict candidates; retain human confirmation for supersession. | Phase 2 graph foundation, automated resolution later. |
+| Event conflicts | Deterministic event identity deduplicates repeats; material changes create reviewable conflict candidates with explicit resolution. General knowledge-atom conflict detection remains future work. | Event lifecycle slice complete; general contradiction handling later. |
 | Projection sync is best effort | Persist projection jobs in the same transaction as memory changes; retry and rebuild projections independently. | Phase 2 graph foundation. |
 | Incomplete provenance | Record provenance kind (`conversation`, `evidence`, `inferred`) and require source turn and/or evidence references. | Phase 2 graph foundation. |
 | Vector-only retrieval | Retain vector retrieval; add graph neighborhood/traversal and fusion only after the graph is populated. | Phase 3 retrieval and reasoning. |

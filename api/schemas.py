@@ -35,6 +35,19 @@ class SessionListResponse(BaseModel):
 
 # ── Messages ──────────────────────────────────────────────────────────────────
 
+class SessionMessageResponse(BaseModel):
+    message_id: str
+    trace_id: str | None = None
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str
+    attachments: list[dict] = Field(default_factory=list)
+
+
+class SessionMessagesResponse(BaseModel):
+    messages: list[SessionMessageResponse]
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=32_000)
     inline_context: str = Field(default="")  # parsed content of a chat-attached file (bypasses retrieval)
@@ -95,3 +108,7 @@ class MemoryEditRequest(BaseModel):
 
 class MemorySupersedeRequest(BaseModel):
     replacement_memory_id: str
+
+
+class MemoryConflictResolutionRequest(BaseModel):
+    action: Literal["supersede_existing", "keep_existing", "expire_existing"]

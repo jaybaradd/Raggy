@@ -42,7 +42,7 @@ async def extract_turn_memories(
                 project_scope=project_scope,
                 user_content=user_content,
             )
-            store.upsert(MemoryRecord(
+            record = MemoryRecord(
                 owner_id=owner_id,
                 scope=decision.scope,
                 session_id=session_id,
@@ -57,7 +57,13 @@ async def extract_turn_memories(
                 extraction_version=extractor.version,
                 valid_to=decision.valid_to,
                 payload=candidate.payload,
-            ), event_type=decision.event_type, details={"policy_reason": decision.reason})
+            )
+            if candidate.kind == "event":
+                store.capture_event(record, event_type=decision.event_type,
+                                    details={"policy_reason": decision.reason})
+            else:
+                store.upsert(record, event_type=decision.event_type,
+                             details={"policy_reason": decision.reason})
         # Projection jobs make active project records searchable and graph
         # compatible, while candidates remain deliberately absent from both.
         await asyncio.to_thread(sync_pending_projections, store=store)

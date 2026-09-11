@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from api.schemas import (
     CreateSessionRequest,
     SessionListResponse,
+    SessionMessagesResponse,
     SessionResponse,
     UpdateSessionRequest,
 )
@@ -59,6 +60,16 @@ def get_session(session_id: str) -> SessionResponse:
         project_scope=session["project_scope"],
         created_at=session["created_at"],
     )
+
+
+@router.get("/{session_id}/messages", response_model=SessionMessagesResponse)
+def get_session_messages(session_id: str) -> SessionMessagesResponse:
+    """Return durable conversation history in original turn order."""
+    try:
+        messages = session_store.get_messages(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found") from None
+    return SessionMessagesResponse(messages=messages)
 
 
 @router.patch("/{session_id}", response_model=SessionResponse)

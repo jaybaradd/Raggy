@@ -2,6 +2,14 @@
 
 ---
 
+### ✅ [2026-09-11] Event deduplication and conflict review
+
+- Added repository-enforced deterministic identity keys for event memories, scoped by owner, session/project, event type, entities, location, and temporal marker.
+- Repeated event captures now retain one authoritative memory and append a `duplicate_detected` audit event instead of creating duplicate shipments.
+- Material event updates create a reviewable candidate plus an auditable conflict record; they never overwrite the existing event automatically.
+- Added conflict inspection and resolution APIs. Resolution can retain the existing event, supersede it, or expire it while activating the reviewed incoming event and synchronizing projections.
+- Added deterministic coverage for duplicate events, temporal conflicts, conflict resolution, project isolation, and expiration followed by a new event.
+
 ### 📝 [2026-09-10] Hybrid memory architecture decision recorded
 
 - Documented the SQLite/Postgres + Qdrant + graph strategy, its advantages, and mitigations for graph noise, hallucinated relationships, duplication, contradictions, stale data, privacy leakage, projection inconsistency, and operational complexity in `Roadmap.md`.
@@ -22,6 +30,13 @@
 - Added deterministic project-capture policy: high-confidence events in a named project become active project memories automatically; generic knowledge, entities, solutions, and ambiguous claims remain candidates.
 - Added conservative event validity windows using the original user wording, with a default review window when no relative time is available.
 - Active project events now enter the existing Qdrant and graph projections; their graph edge retains source-turn provenance and temporal qualifiers.
+
+### ✅ [2026-09-11] Durable conversations
+
+- Replaced the in-memory session store with a SQLite-backed session/message repository, using a Postgres-compatible boundary and schema shape.
+- Added durable session ownership, project membership, ordered message history, trace IDs, and attachment metadata.
+- Added `GET /api/sessions/{session_id}/messages`; opening a chat in the frontend now restores its stored messages.
+- Added persistence and owner-isolation tests, including recreation of the repository from disk to simulate a process restart.
 
 ### ✅ [2026-09-10] Knowledge-base retrieval control
 

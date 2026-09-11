@@ -6,7 +6,8 @@ import logging
 
 from fastapi import APIRouter, Header, HTTPException
 
-from api.schemas import MemoryEditRequest, MemoryListResponse, MemoryPromotionRequest, MemorySupersedeRequest
+from api.schemas import (MemoryConflictResolutionRequest, MemoryEditRequest, MemoryListResponse,
+                         MemoryPromotionRequest, MemorySupersedeRequest)
 from core.memory.projections import sync_pending_projections
 from core.storage.graph_store import graph_store
 from core.storage.memory_store import memory_store
@@ -68,6 +69,34 @@ def list_graph_edges(owner_id: str = Header(default="default", alias="X-Owner-ID
 def list_projection_jobs(owner_id: str = Header(default="default", alias="X-Owner-ID"),
                          status: str | None = None):
     return {"jobs": memory_store.list_projection_jobs(owner_id=_owner(owner_id), status=status)}
+
+
+@router.get("/conflicts")
+def list_conflicts(owner_id: str = Header(default="default", alias="X-Owner-ID"),
+                   status: str | None = "open"):
+    return {"conflicts": memory_store.list_conflicts(owner_id=_owner(owner_id), status=status)}
+
+
+@router.get("/conflicts/{conflict_id}")
+def get_conflict(conflict_id: int, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    conflict = memory_store.get_conflict(conflict_id, owner_id=_owner(owner_id))
+    if conflict is None:
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    return conflict
+
+
+@router.post("/conflicts/{conflict_id}/resolve")
+def resolve_conflict(conflict_id: int, body: MemoryConflictResolutionRequest,
+                     owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    try:
+        conflict = memory_store.resolve_conflict(conflict_id, action=body.action, actor_id=_owner(owner_id))
+        for memory_id in (conflict["incoming_memory_id"], conflict["existing_memory_id"]):
+            record = memory_store.get(memory_id)
+            if record:
+                _sync_projection(record)
+        return conflict
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 422, detail=str(exc)) from exc
 
 
 @router.post("/{memory_id}/confirm")

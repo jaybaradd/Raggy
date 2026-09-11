@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -13,6 +14,14 @@ from core.memory.models import (
     EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
     PreferenceMemory, SolutionMemory,
 )
+from core.memory.identity import event_comparison_key, event_differences, event_identity_key
+
+
+@dataclass(frozen=True)
+class EventCaptureResult:
+    outcome: str
+    record: MemoryRecord
+    conflict_id: int | None = None
 
 
 class MemoryStore:
@@ -40,7 +49,7 @@ class MemoryStore:
                     confidence REAL NOT NULL, user_confirmed INTEGER NOT NULL,
                     evidence_refs_json TEXT NOT NULL, source_turn_id TEXT,
                     extraction_model TEXT NOT NULL, extraction_version TEXT NOT NULL,
-                    valid_from TEXT NOT NULL, valid_to TEXT, superseded_by TEXT,
+                    identity_key TEXT, valid_from TEXT NOT NULL, valid_to TEXT, superseded_by TEXT,
                     payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_scope
@@ -69,6 +78,23 @@ class MemoryStore:
                     FOREIGN KEY(from_memory_id) REFERENCES memory_records(memory_id),
                     FOREIGN KEY(to_memory_id) REFERENCES memory_records(memory_id)
                 );
+                CREATE TABLE IF NOT EXISTS memory_conflicts (
+                    conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incoming_memory_id TEXT NOT NULL,
+                    existing_memory_id TEXT NOT NULL,
+                    conflict_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    details_json TEXT NOT NULL,
+                    resolved_by TEXT,
+                    resolution_json TEXT,
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    FOREIGN KEY(incoming_memory_id) REFERENCES memory_records(memory_id),
+                    FOREIGN KEY(existing_memory_id) REFERENCES memory_records(memory_id),
+                    UNIQUE(incoming_memory_id, existing_memory_id, status)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_conflicts_status
+                    ON memory_conflicts(status, created_at DESC);
                 CREATE TABLE IF NOT EXISTS memory_access_events (
                     access_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trace_id TEXT NOT NULL,
@@ -99,6 +125,20 @@ class MemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_memory_projection_jobs_pending
                     ON memory_projection_jobs(status, updated_at);
             """)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
+            if "identity_key" not in columns:
+                connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
+            connection.execute("""CREATE INDEX IF NOT EXISTS idx_memory_event_identity
+                                ON memory_records(owner_id, scope, session_id, project_scope, identity_key)""")
+            for row in connection.execute(
+                "SELECT * FROM memory_records WHERE kind = 'event' AND identity_key IS NULL"
+            ).fetchall():
+                record = self._from_row(row)
+                connection.execute("UPDATE memory_records SET identity_key = ? WHERE memory_id = ?",
+                                   (event_identity_key(record), record.memory_id))
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
+            if "identity_key" not in columns:
+                connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
 
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
                             event_type: str, message_id: str | None = None,
@@ -153,27 +193,87 @@ class MemoryStore:
         now = datetime.now(timezone.utc)
         record.updated_at = now
         with self._lock, self._connect() as connection:
-            connection.execute("""
+            self._upsert_locked(connection, record, event_type=event_type, actor_id=actor_id,
+                                details=details, now=now)
+
+    def _upsert_locked(self, connection: sqlite3.Connection, record: MemoryRecord, *, event_type: str,
+                       actor_id: str | None, details: dict | None, now: datetime) -> None:
+        connection.execute("""
                 INSERT INTO memory_records (
                     memory_id, owner_id, scope, session_id, project_scope, kind, status,
                     confidence, user_confirmed, evidence_refs_json, source_turn_id,
-                    extraction_model, extraction_version, valid_from, valid_to, superseded_by,
+                    extraction_model, extraction_version, identity_key, valid_from, valid_to, superseded_by,
                     payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     owner_id=excluded.owner_id, scope=excluded.scope,
                     session_id=excluded.session_id, project_scope=excluded.project_scope,
                     status=excluded.status, confidence=excluded.confidence,
                     user_confirmed=excluded.user_confirmed, evidence_refs_json=excluded.evidence_refs_json,
-                    valid_to=excluded.valid_to, superseded_by=excluded.superseded_by,
+                    identity_key=excluded.identity_key, valid_to=excluded.valid_to, superseded_by=excluded.superseded_by,
                     payload_json=excluded.payload_json, updated_at=excluded.updated_at
             """, self._params(record))
-            connection.execute(
-                "INSERT INTO memory_audit_events (memory_id, event_type, actor_id, details_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (record.memory_id, event_type, actor_id, json.dumps(details or {}, sort_keys=True), now.isoformat()),
-            )
-            self._enqueue_projection_locked(connection, record.memory_id, "qdrant", now.isoformat())
-            self._enqueue_projection_locked(connection, record.memory_id, "graph", now.isoformat())
+        self._audit_locked(connection, record.memory_id, event_type, actor_id, details, now)
+        self._enqueue_projection_locked(connection, record.memory_id, "qdrant", now.isoformat())
+        self._enqueue_projection_locked(connection, record.memory_id, "graph", now.isoformat())
+
+    @staticmethod
+    def _audit_locked(connection: sqlite3.Connection, memory_id: str, event_type: str,
+                      actor_id: str | None, details: dict | None, now: datetime) -> None:
+        connection.execute(
+            "INSERT INTO memory_audit_events (memory_id, event_type, actor_id, details_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (memory_id, event_type, actor_id, json.dumps(details or {}, sort_keys=True), now.isoformat()),
+        )
+
+    def capture_event(self, record: MemoryRecord, *, event_type: str, details: dict | None = None,
+                      actor_id: str | None = None) -> EventCaptureResult:
+        """Atomically save a new event, discard an exact duplicate, or open a conflict."""
+        if record.kind != "event":
+            raise ValueError("capture_event requires an event memory")
+        record.identity_key = event_identity_key(record)
+        comparison_key = event_comparison_key(record)
+        now = datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM memory_records WHERE owner_id = ? AND scope = ?
+                   AND COALESCE(session_id, '') = COALESCE(?, '')
+                   AND COALESCE(project_scope, '') = COALESCE(?, '')
+                   AND kind = 'event' AND status IN ('candidate', 'active')""",
+                (record.owner_id, record.scope, record.session_id, record.project_scope),
+            ).fetchall()
+            existing = [self._from_row(row) for row in rows]
+            exact = next((item for item in existing if item.identity_key == record.identity_key), None)
+            if exact:
+                self._audit_locked(connection, exact.memory_id, "duplicate_detected", actor_id,
+                                   {"source_turn_id": record.source_turn_id, "identity_key": record.identity_key}, now)
+                return EventCaptureResult("duplicate", exact)
+
+            comparable = next((item for item in existing if comparison_key and event_comparison_key(item) == comparison_key), None)
+            if comparable:
+                differences = event_differences(comparable, record)
+                if differences:
+                    record.status = "candidate"
+                    record.user_confirmed = False
+                    record.updated_at = now
+                    self._upsert_locked(connection, record, event_type="conflict_candidate_created",
+                                        actor_id=actor_id, details=details, now=now)
+                    conflict_type = "temporal_mismatch" if "temporal_scope" in differences else "location_mismatch"
+                    cursor = connection.execute(
+                        """INSERT INTO memory_conflicts (
+                            incoming_memory_id, existing_memory_id, conflict_type, status, details_json, created_at
+                        ) VALUES (?, ?, ?, 'open', ?, ?)""",
+                        (record.memory_id, comparable.memory_id, conflict_type,
+                         json.dumps({"differences": differences}, sort_keys=True), now.isoformat()),
+                    )
+                    self._audit_locked(connection, comparable.memory_id, "conflict_detected", actor_id,
+                                       {"conflict_id": cursor.lastrowid, "incoming_memory_id": record.memory_id,
+                                        "differences": differences}, now)
+                    return EventCaptureResult("conflict", record, cursor.lastrowid)
+
+            record.updated_at = now
+            self._upsert_locked(connection, record, event_type=event_type, actor_id=actor_id,
+                                details=details, now=now)
+        return EventCaptureResult("created", record)
 
     @staticmethod
     def _enqueue_projection_locked(connection: sqlite3.Connection, memory_id: str,
@@ -258,6 +358,78 @@ class MemoryStore:
                 [*params, limit],
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_conflicts(self, *, owner_id: str, status: str | None = "open") -> list[dict]:
+        clauses = ["incoming.owner_id = ?"]
+        params: list[object] = [owner_id]
+        if status is not None:
+            clauses.append("conflicts.status = ?")
+            params.append(status)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT conflicts.*, incoming.owner_id FROM memory_conflicts AS conflicts
+                    JOIN memory_records AS incoming ON incoming.memory_id = conflicts.incoming_memory_id
+                    WHERE {' AND '.join(clauses)} ORDER BY conflicts.created_at DESC""", params
+            ).fetchall()
+        return [self._conflict_from_row(row) for row in rows]
+
+    def get_conflict(self, conflict_id: int, *, owner_id: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT conflicts.*, incoming.owner_id FROM memory_conflicts AS conflicts
+                   JOIN memory_records AS incoming ON incoming.memory_id = conflicts.incoming_memory_id
+                   WHERE conflicts.conflict_id = ? AND incoming.owner_id = ?""",
+                (conflict_id, owner_id),
+            ).fetchone()
+        return self._conflict_from_row(row) if row else None
+
+    def resolve_conflict(self, conflict_id: int, *, action: str, actor_id: str) -> dict:
+        if action not in {"supersede_existing", "keep_existing", "expire_existing"}:
+            raise ValueError("Unsupported conflict resolution")
+        now = datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT conflicts.*, incoming.owner_id FROM memory_conflicts AS conflicts
+                   JOIN memory_records AS incoming ON incoming.memory_id = conflicts.incoming_memory_id
+                   WHERE conflicts.conflict_id = ? AND incoming.owner_id = ? AND conflicts.status = 'open'""",
+                (conflict_id, actor_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Open conflict '{conflict_id}' not found")
+            conflict = self._conflict_from_row(row)
+            incoming = self._from_row(connection.execute(
+                "SELECT * FROM memory_records WHERE memory_id = ?", (conflict["incoming_memory_id"],)
+            ).fetchone())
+            existing = self._from_row(connection.execute(
+                "SELECT * FROM memory_records WHERE memory_id = ?", (conflict["existing_memory_id"],)
+            ).fetchone())
+            if action == "keep_existing":
+                incoming.status = "rejected"
+                self._upsert_locked(connection, incoming, event_type="conflict_rejected", actor_id=actor_id,
+                                    details={"conflict_id": conflict_id}, now=now)
+            else:
+                incoming.status = "active"
+                incoming.user_confirmed = True
+                self._upsert_locked(connection, incoming, event_type="conflict_accepted", actor_id=actor_id,
+                                    details={"conflict_id": conflict_id}, now=now)
+                if action == "supersede_existing":
+                    existing.status = "superseded"
+                    existing.superseded_by = incoming.memory_id
+                    self._upsert_locked(connection, existing, event_type="superseded", actor_id=actor_id,
+                                        details={"conflict_id": conflict_id, "replacement_memory_id": incoming.memory_id}, now=now)
+                else:
+                    existing.status = "expired"
+                    existing.valid_to = now
+                    self._upsert_locked(connection, existing, event_type="expired", actor_id=actor_id,
+                                        details={"conflict_id": conflict_id}, now=now)
+            resolution = {"action": action, "incoming_memory_id": incoming.memory_id,
+                          "existing_memory_id": existing.memory_id}
+            connection.execute(
+                """UPDATE memory_conflicts SET status = 'resolved', resolved_by = ?, resolution_json = ?,
+                   resolved_at = ? WHERE conflict_id = ?""",
+                (actor_id, json.dumps(resolution, sort_keys=True), now.isoformat(), conflict_id),
+            )
+        return self.get_conflict(conflict_id, owner_id=actor_id) or conflict
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection:
@@ -366,7 +538,7 @@ class MemoryStore:
         return (record.memory_id, record.owner_id, record.scope, record.session_id, record.project_scope,
                 record.kind, record.status, record.confidence, int(record.user_confirmed),
                 json.dumps(record.evidence_refs), record.source_turn_id, record.extraction_model,
-                record.extraction_version, record.valid_from.isoformat(),
+                record.extraction_version, record.identity_key, record.valid_from.isoformat(),
                 record.valid_to.isoformat() if record.valid_to else None, record.superseded_by,
                 json.dumps(record.payload.model_dump(mode="json"), sort_keys=True),
                 record.created_at.isoformat(), record.updated_at.isoformat())
@@ -379,11 +551,22 @@ class MemoryStore:
             status=row["status"], confidence=row["confidence"], user_confirmed=bool(row["user_confirmed"]),
             evidence_refs=json.loads(row["evidence_refs_json"]), source_turn_id=row["source_turn_id"],
             extraction_model=row["extraction_model"], extraction_version=row["extraction_version"],
+            identity_key=row["identity_key"],
             valid_from=datetime.fromisoformat(row["valid_from"]),
             valid_to=datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None,
             superseded_by=row["superseded_by"], payload=json.loads(row["payload_json"]),
             created_at=datetime.fromisoformat(row["created_at"]), updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    @staticmethod
+    def _conflict_from_row(row: sqlite3.Row) -> dict:
+        result = dict(row)
+        result["details"] = json.loads(result.pop("details_json"))
+        resolution = result.pop("resolution_json", None)
+        if resolution:
+            result["resolution"] = json.loads(resolution)
+        result.pop("owner_id", None)
+        return result
 
 
 memory_store = MemoryStore()
