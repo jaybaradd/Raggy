@@ -5,10 +5,18 @@
 ### ✅ [2026-09-11] Event deduplication and conflict review
 
 - Added repository-enforced deterministic identity keys for event memories, scoped by owner, session/project, event type, entities, location, and temporal marker.
+- Canonicalized event types through a backend taxonomy (for example, `shipment arrival` and `shipment_arrival` both become `shipment_arrival`) while retaining the original extracted label for provenance.
+- Event comparison now uses canonical type plus stable identifier overlap (for example, `AC-42`), so incidental extracted entities do not suppress a legitimate conflict.
 - Repeated event captures now retain one authoritative memory and append a `duplicate_detected` audit event instead of creating duplicate shipments.
 - Material event updates create a reviewable candidate plus an auditable conflict record; they never overwrite the existing event automatically.
 - Added conflict inspection and resolution APIs. Resolution can retain the existing event, supersede it, or expire it while activating the reviewed incoming event and synchronizing projections.
 - Added deterministic coverage for duplicate events, temporal conflicts, conflict resolution, project isolation, and expiration followed by a new event.
+
+### ✅ [2026-09-11] Inline conflict resolution
+
+- Added a chat-level review card for open event conflicts in the active project, with clear existing-versus-updated values.
+- Users can accept the update, keep the existing memory, or defer review without using a terminal command.
+- The card polls briefly after streaming completes because event extraction and conflict creation run asynchronously after the assistant response.
 
 ### 📝 [2026-09-10] Hybrid memory architecture decision recorded
 

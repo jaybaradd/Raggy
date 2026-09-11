@@ -14,7 +14,7 @@ from core.memory.models import (
     EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
     PreferenceMemory, SolutionMemory,
 )
-from core.memory.identity import event_comparison_key, event_differences, event_identity_key
+from core.memory.identity import events_are_comparable, event_differences, event_identity_key
 
 
 @dataclass(frozen=True)
@@ -130,12 +130,13 @@ class MemoryStore:
                 connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
             connection.execute("""CREATE INDEX IF NOT EXISTS idx_memory_event_identity
                                 ON memory_records(owner_id, scope, session_id, project_scope, identity_key)""")
-            for row in connection.execute(
-                "SELECT * FROM memory_records WHERE kind = 'event' AND identity_key IS NULL"
-            ).fetchall():
+            for row in connection.execute("SELECT * FROM memory_records WHERE kind = 'event'").fetchall():
                 record = self._from_row(row)
-                connection.execute("UPDATE memory_records SET identity_key = ? WHERE memory_id = ?",
-                                   (event_identity_key(record), record.memory_id))
+                connection.execute(
+                    "UPDATE memory_records SET identity_key = ?, payload_json = ? WHERE memory_id = ?",
+                    (event_identity_key(record), json.dumps(record.payload.model_dump(mode="json"), sort_keys=True),
+                     record.memory_id),
+                )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
             if "identity_key" not in columns:
                 connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
@@ -231,24 +232,25 @@ class MemoryStore:
         if record.kind != "event":
             raise ValueError("capture_event requires an event memory")
         record.identity_key = event_identity_key(record)
-        comparison_key = event_comparison_key(record)
         now = datetime.now(timezone.utc)
         with self._lock, self._connect() as connection:
+            session_clause = "AND COALESCE(session_id, '') = COALESCE(?, '')" if record.scope == "session" else ""
+            session_params: tuple[object, ...] = (record.session_id,) if record.scope == "session" else ()
             rows = connection.execute(
                 """SELECT * FROM memory_records WHERE owner_id = ? AND scope = ?
-                   AND COALESCE(session_id, '') = COALESCE(?, '')
+                   %s
                    AND COALESCE(project_scope, '') = COALESCE(?, '')
-                   AND kind = 'event' AND status IN ('candidate', 'active')""",
-                (record.owner_id, record.scope, record.session_id, record.project_scope),
+                   AND kind = 'event' AND status IN ('candidate', 'active')""" % session_clause,
+                (record.owner_id, record.scope, *session_params, record.project_scope),
             ).fetchall()
             existing = [self._from_row(row) for row in rows]
-            exact = next((item for item in existing if item.identity_key == record.identity_key), None)
+            exact = next((item for item in existing if event_identity_key(item) == record.identity_key), None)
             if exact:
                 self._audit_locked(connection, exact.memory_id, "duplicate_detected", actor_id,
                                    {"source_turn_id": record.source_turn_id, "identity_key": record.identity_key}, now)
                 return EventCaptureResult("duplicate", exact)
 
-            comparable = next((item for item in existing if comparison_key and event_comparison_key(item) == comparison_key), None)
+            comparable = next((item for item in existing if events_are_comparable(item, record)), None)
             if comparable:
                 differences = event_differences(comparable, record)
                 if differences:
@@ -367,7 +369,7 @@ class MemoryStore:
             params.append(status)
         with self._connect() as connection:
             rows = connection.execute(
-                f"""SELECT conflicts.*, incoming.owner_id FROM memory_conflicts AS conflicts
+                f"""SELECT conflicts.*, incoming.owner_id, incoming.project_scope FROM memory_conflicts AS conflicts
                     JOIN memory_records AS incoming ON incoming.memory_id = conflicts.incoming_memory_id
                     WHERE {' AND '.join(clauses)} ORDER BY conflicts.created_at DESC""", params
             ).fetchall()
@@ -376,7 +378,7 @@ class MemoryStore:
     def get_conflict(self, conflict_id: int, *, owner_id: str) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(
-                """SELECT conflicts.*, incoming.owner_id FROM memory_conflicts AS conflicts
+                """SELECT conflicts.*, incoming.owner_id, incoming.project_scope FROM memory_conflicts AS conflicts
                    JOIN memory_records AS incoming ON incoming.memory_id = conflicts.incoming_memory_id
                    WHERE conflicts.conflict_id = ? AND incoming.owner_id = ?""",
                 (conflict_id, owner_id),

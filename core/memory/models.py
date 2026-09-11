@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from core.memory.event_types import canonical_event_type
+
 MemoryKind = Literal["knowledge", "preference", "solution", "entity", "event"]
 MemoryScope = Literal["session", "project", "user", "organization"]
 MemoryStatus = Literal["candidate", "active", "superseded", "rejected", "expired"]
@@ -53,10 +55,23 @@ class EventMemory(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     event_type: str = Field(min_length=1, max_length=500)
+    event_type_raw: str | None = Field(default=None, max_length=500)
     summary: str = Field(min_length=1, max_length=4_000)
     entities: list[str] = Field(default_factory=list, max_length=20)
     locations: list[str] = Field(default_factory=list, max_length=20)
     temporal_scope: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def canonicalise_event_type(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        raw = str(payload.get("event_type", "")).strip()
+        if raw:
+            payload.setdefault("event_type_raw", raw)
+            payload["event_type"] = canonical_event_type(raw)
+        return payload
 
 
 MemoryPayload = Union[KnowledgeAtom, PreferenceMemory, SolutionMemory, EntityMemory, EventMemory]

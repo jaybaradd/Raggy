@@ -7,6 +7,7 @@ let currentSessionId = null;
 let isStreaming = false;
 let pendingFile = null;       // File object waiting to be uploaded on send
 let detectedYtUrl = null;     // YouTube URL detected in textarea
+const shownConflictIds = new Set();
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const newChatBtn         = document.getElementById('newChatBtn');
@@ -311,6 +312,7 @@ async function sendMessage() {
   if (emptyState) emptyState.style.display = 'none';
 
   const botBubble = appendBubble('bot', '');
+  const requestStartedAt = Date.now();
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
   botBubble.appendChild(cursor);
@@ -371,6 +373,7 @@ async function sendMessage() {
     cursor.remove();
     renderSources(botBubble, sourceMetadata);
     renderMemories(botBubble, memoryMetadata);
+    scheduleConflictCheck(botBubble, projectScopeInput.value.trim() || null);
     scrollToBottom();
 
   } catch (err) {
@@ -379,6 +382,87 @@ async function sendMessage() {
   } finally {
     isStreaming = false;
     updateSendBtn();
+  }
+}
+
+function scheduleConflictCheck(botBubble, projectScope) {
+  // Extraction runs after the streamed reply, so retry briefly rather than
+  // making the user send another message or open a terminal.
+  [0, 1500, 4000, 8000].forEach(delay => {
+    setTimeout(() => loadOpenConflicts(botBubble, projectScope), delay);
+  });
+}
+
+async function loadOpenConflicts(botBubble, projectScope) {
+  try {
+    const res = await fetch(`${API}/api/memories/conflicts`);
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.conflicts || [])
+      .filter(conflict => !shownConflictIds.has(conflict.conflict_id))
+      .filter(conflict => conflict.project_scope === projectScope)
+      .forEach(conflict => {
+        shownConflictIds.add(conflict.conflict_id);
+        renderConflictReview(botBubble, conflict);
+      });
+  } catch (err) {
+    console.error('Failed to load memory conflicts:', err);
+  }
+}
+
+function renderConflictReview(botBubble, conflict) {
+  const temporal = conflict.details?.differences?.temporal_scope;
+  const existingValue = temporal?.existing || 'the existing event';
+  const incomingValue = temporal?.incoming || 'the update';
+  const card = document.createElement('div');
+  card.className = 'conflict-review-card';
+
+  const title = document.createElement('div');
+  title.className = 'conflict-review-title';
+  title.textContent = 'Memory update needs confirmation';
+  const summary = document.createElement('div');
+  summary.className = 'conflict-review-summary';
+  summary.textContent = `The existing event says ${existingValue}; your update says ${incomingValue}.`;
+  const actions = document.createElement('div');
+  actions.className = 'conflict-review-actions';
+
+  const accept = document.createElement('button');
+  accept.className = 'conflict-action primary';
+  accept.textContent = `Accept ${incomingValue}`;
+  accept.addEventListener('click', () => resolveConflict(conflict, 'supersede_existing', card, actions));
+  const keep = document.createElement('button');
+  keep.className = 'conflict-action';
+  keep.textContent = `Keep ${existingValue}`;
+  keep.addEventListener('click', () => resolveConflict(conflict, 'keep_existing', card, actions));
+  const later = document.createElement('button');
+  later.className = 'conflict-action quiet';
+  later.textContent = 'Review later';
+  later.addEventListener('click', () => card.remove());
+  actions.append(accept, keep, later);
+  card.append(title, summary, actions);
+  botBubble.appendChild(card);
+  scrollToBottom();
+}
+
+async function resolveConflict(conflict, action, card, actions) {
+  actions.querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    const res = await fetch(`${API}/api/memories/conflicts/${conflict.conflict_id}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.detail || 'Could not resolve this memory update');
+    }
+    card.classList.add('resolved');
+    actions.textContent = action === 'keep_existing'
+      ? 'Kept the existing memory.'
+      : 'Accepted the update. Future responses will use it.';
+  } catch (err) {
+    actions.textContent = `Could not resolve: ${err.message}`;
+    actions.classList.add('error');
   }
 }
 
