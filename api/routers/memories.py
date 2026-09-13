@@ -71,6 +71,18 @@ def list_projection_jobs(owner_id: str = Header(default="default", alias="X-Owne
     return {"jobs": memory_store.list_projection_jobs(owner_id=_owner(owner_id), status=status)}
 
 
+@router.post("/expiry-sweep")
+def expire_due_memories(owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    """Run a scoped, idempotent expiry sweep for the current owner."""
+    expired = memory_store.expire_due(owner_id=_owner(owner_id))
+    if expired:
+        try:
+            sync_pending_projections(store=memory_store)
+        except Exception:
+            logger.exception("Memory projection sync failed after expiry sweep")
+    return {"expired_count": len(expired), "memory_ids": [record.memory_id for record in expired]}
+
+
 @router.get("/conflicts")
 def list_conflicts(owner_id: str = Header(default="default", alias="X-Owner-ID"),
                    status: str | None = "open"):

@@ -14,8 +14,10 @@ processes and would both try to open the same local Qdrant directory.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+from contextlib import asynccontextmanager, suppress
 
 import uvicorn
 from fastapi import FastAPI
@@ -24,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routers import documents, memories, messages, sessions
 from api.schemas import HealthResponse
+from core.memory.expiry import expiry_sweep_loop, run_expiry_sweep
 from core.storage.qdrant_store import qdrant_store
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -35,12 +38,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Application ───────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        await run_expiry_sweep()
+    except Exception:
+        logger.exception("Startup expiry sweep failed")
+    expiry_task = asyncio.create_task(expiry_sweep_loop(), name="memory-expiry-sweep")
+    try:
+        yield
+    finally:
+        expiry_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await expiry_task
+
+
 app = FastAPI(
     title="Raggy",
     description="Multimodal RAG Chatbot — Phase 1 (Hybrid Retrieval + All Modalities)",
     version="0.2.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 # Allow the frontend (served from a different port in dev) to call the API

@@ -55,6 +55,8 @@ class MemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_memory_scope
                     ON memory_records(owner_id, scope, session_id, project_scope, status);
                 CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory_records(kind, status);
+                CREATE INDEX IF NOT EXISTS idx_memory_expiry
+                    ON memory_records(status, valid_to);
                 CREATE TABLE IF NOT EXISTS memory_audit_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT NOT NULL,
                     event_type TEXT NOT NULL, actor_id TEXT, details_json TEXT NOT NULL,
@@ -137,10 +139,6 @@ class MemoryStore:
                     (event_identity_key(record), json.dumps(record.payload.model_dump(mode="json"), sort_keys=True),
                      record.memory_id),
                 )
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
-            if "identity_key" not in columns:
-                connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
-
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
                             event_type: str, message_id: str | None = None,
                             prompt_label: str | None = None, rank: int | None = None,
@@ -330,6 +328,37 @@ class MemoryStore:
                 (now,),
             )
         return cursor.rowcount
+
+    def expire_due(self, *, now: datetime | None = None, owner_id: str | None = None) -> list[MemoryRecord]:
+        """Expire due active memories and enqueue projection removal atomically.
+
+        Re-running this operation is safe: only active records whose validity
+        deadline has passed are selected, and each receives one audit entry.
+        """
+        sweep_time = now or datetime.now(timezone.utc)
+        clauses = ["status = 'active'", "valid_to IS NOT NULL", "valid_to <= ?"]
+        params: list[object] = [sweep_time.isoformat()]
+        if owner_id is not None:
+            clauses.append("owner_id = ?")
+            params.append(owner_id)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM memory_records WHERE {' AND '.join(clauses)} ORDER BY valid_to", params
+            ).fetchall()
+            expired: list[MemoryRecord] = []
+            for row in rows:
+                record = self._from_row(row)
+                original_valid_to = record.valid_to
+                record.status = "expired"
+                record.updated_at = sweep_time
+                self._upsert_locked(
+                    connection, record, event_type="expired_by_sweep", actor_id="system",
+                    details={"expired_at": sweep_time.isoformat(),
+                             "valid_to": original_valid_to.isoformat() if original_valid_to else None},
+                    now=sweep_time,
+                )
+                expired.append(record)
+        return expired
 
     def enqueue_all_projections(self) -> int:
         """Schedule a full rebuild of derived graph and vector projections."""

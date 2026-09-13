@@ -2,6 +2,14 @@
 
 ---
 
+### ✅ [2026-09-13] Expiry sweep lifecycle hardening
+
+- Added an idempotent repository sweep that formally transitions due active memories to `expired`, preserves their original validity deadline, and appends an `expired_by_sweep` audit event.
+- Expiry changes enqueue Qdrant and graph projection updates in the same transaction; derived stores are synchronized immediately after the sweep.
+- The server runs one sweep at startup and repeats it on a configurable interval (`MEMORY_EXPIRY_SWEEP_INTERVAL_SECONDS`, default five minutes).
+- Added `POST /api/memories/expiry-sweep` for scoped manual verification and operations.
+- Added deterministic coverage for expiry, audit/projection updates, repeat safety, future deadlines, and owner isolation.
+
 ### ✅ [2026-09-11] Event deduplication and conflict review
 
 - Added repository-enforced deterministic identity keys for event memories, scoped by owner, session/project, event type, entities, location, and temporal marker.
