@@ -38,15 +38,18 @@ def list_candidates(owner_id: str = Header(default="default", alias="X-Owner-ID"
 def list_memories(owner_id: str = Header(default="default", alias="X-Owner-ID"),
                   scope: str | None = None, status: str | None = "active",
                   session_id: str | None = None, project_scope: str | None = None,
-                  kind: str | None = None) -> MemoryListResponse:
+                  kind: str | None = None, limit: int = 100) -> MemoryListResponse:
+    if status == "all":
+        status = None
     records = memory_store.list(owner_id=_owner(owner_id), scope=scope, status=status,
-                                session_id=session_id, project_scope=project_scope, kind=kind)
+                                session_id=session_id, project_scope=project_scope, kind=kind,
+                                limit=min(max(limit, 1), 200))
     return MemoryListResponse(memories=[record.model_dump(mode="json") for record in records])
 
 
 def _get(memory_id: str, owner_id: str):
-    record = memory_store.get(memory_id)
-    if record is None or record.owner_id != _owner(owner_id):
+    record = memory_store.get_owned(memory_id, owner_id=_owner(owner_id))
+    if record is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return record
 
@@ -109,6 +112,35 @@ def resolve_conflict(conflict_id: int, body: MemoryConflictResolutionRequest,
         return conflict
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 422, detail=str(exc)) from exc
+
+
+@router.get("/{memory_id}/audit")
+def get_memory_audit(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    try:
+        return {"events": memory_store.list_audit_events(memory_id, owner_id=_owner(owner_id))}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Memory not found") from None
+
+
+@router.get("/{memory_id}/access-events")
+def get_memory_access_events(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    try:
+        return {"events": memory_store.list_access_events(memory_id, owner_id=_owner(owner_id))}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Memory not found") from None
+
+
+@router.get("/{memory_id}")
+def get_memory(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    return _get(memory_id, owner_id).model_dump(mode="json")
+
+
+@router.delete("/{memory_id}")
+def forget_memory(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    _get(memory_id, owner_id)
+    record = memory_store.forget(memory_id, actor_id=_owner(owner_id))
+    _sync_projection(record)
+    return record.model_dump(mode="json")
 
 
 @router.post("/{memory_id}/confirm")

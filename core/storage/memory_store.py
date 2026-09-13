@@ -467,9 +467,14 @@ class MemoryStore:
             row = connection.execute("SELECT * FROM memory_records WHERE memory_id = ?", (memory_id,)).fetchone()
         return self._from_row(row) if row else None
 
+    def get_owned(self, memory_id: str, *, owner_id: str) -> MemoryRecord | None:
+        record = self.get(memory_id)
+        return record if record and record.owner_id == owner_id else None
+
     def list(self, *, owner_id: str, scope: MemoryScope | None = None,
              session_id: str | None = None, project_scope: str | None = None,
-             status: MemoryStatus | None = "active", kind: str | None = None) -> list[MemoryRecord]:
+             status: MemoryStatus | None = "active", kind: str | None = None,
+             limit: int = 100) -> list[MemoryRecord]:
         clauses = ["owner_id = ?"]
         params: list[object] = [owner_id]
         for field, value in (("scope", scope), ("session_id", session_id),
@@ -479,9 +484,33 @@ class MemoryStore:
                 params.append(value)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM memory_records WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC", params
+                f"SELECT * FROM memory_records WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
+                [*params, limit],
             ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def list_audit_events(self, memory_id: str, *, owner_id: str, limit: int = 100) -> list[dict]:
+        if self.get_owned(memory_id, owner_id=owner_id) is None:
+            raise KeyError(f"Memory '{memory_id}' not found")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT event_id, event_type, actor_id, details_json, created_at
+                   FROM memory_audit_events WHERE memory_id = ? ORDER BY event_id DESC LIMIT ?""",
+                (memory_id, limit),
+            ).fetchall()
+        return [{**dict(row), "details": json.loads(row["details_json"])} for row in rows]
+
+    def list_access_events(self, memory_id: str, *, owner_id: str, limit: int = 100) -> list[dict]:
+        if self.get_owned(memory_id, owner_id=owner_id) is None:
+            raise KeyError(f"Memory '{memory_id}' not found")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT trace_id, session_id, message_id, event_type, prompt_label, rank, score,
+                          details_json, created_at
+                   FROM memory_access_events WHERE memory_id = ? ORDER BY access_event_id DESC LIMIT ?""",
+                (memory_id, limit),
+            ).fetchall()
+        return [{**dict(row), "details": json.loads(row["details_json"])} for row in rows]
 
     def transition(self, memory_id: str, status: MemoryStatus, *, actor_id: str | None = None,
                    superseded_by: str | None = None, event_type: str | None = None) -> MemoryRecord:
@@ -512,6 +541,15 @@ class MemoryStore:
         self.upsert(record, event_type=action, actor_id=actor_id)
         return record
 
+    def forget(self, memory_id: str, *, actor_id: str = "default") -> MemoryRecord:
+        """Soft-delete a memory while retaining provenance and lifecycle audit history."""
+        record = self._owned(memory_id, actor_id)
+        if record.status == "deleted":
+            return record
+        record.status = "deleted"
+        self.upsert(record, event_type="deleted_by_user", actor_id=actor_id)
+        return record
+
     def promote(self, memory_id: str, *, scope: MemoryScope, project_scope: str | None = None,
                 actor_id: str = "default") -> MemoryRecord:
         record = self._owned(memory_id, actor_id)
@@ -537,6 +575,8 @@ class MemoryStore:
                          "event": EventMemory}
         parsed = payload_types[record.kind].model_validate(payload)
         record.payload = parsed
+        if record.kind == "event":
+            record.identity_key = event_identity_key(record)
         self.upsert(record, event_type="edited", actor_id=actor_id)
         return record
 

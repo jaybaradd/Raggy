@@ -64,7 +64,11 @@ async def send_message(
     # 1. Persist the user message
     trace_id = str(uuid4())
     user_message_id = session_store.append_message(
-        session_id, role="user", content=body.content, trace_id=trace_id,
+        session_id,
+        role="user",
+        content=body.content,
+        attachments=[attachment.model_dump(mode="json") for attachment in body.attachments],
+        trace_id=trace_id,
     )
 
     # 2. Build context

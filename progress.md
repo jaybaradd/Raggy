@@ -2,6 +2,21 @@
 
 ---
 
+### ✅ [2026-09-13] Durable attachment metadata in chat history
+
+- Replaced the loose chat-attachment dictionaries with a validated API contract: attachment ID, filename, MIME type, byte size, source mode, and optional document/evidence references.
+- The frontend now sends attachment metadata with the user turn, retaining an indexed document ID when the file enters the knowledge base; inline-only attachments deliberately retain no durable binary or document reference.
+- User messages persist this metadata in the existing SQLite `attachments_json` column, and restored conversations render non-interactive attachment chips with their source mode.
+- Added validation, API-contract serialization, and restart-persistence coverage. Raw file bytes remain in the existing upload/ingestion subsystem rather than being copied into conversation storage.
+
+### ✅ [2026-09-13] Memory browser and project-memory controls
+
+- Added a project-aware Memories drawer with scope/status filters, payload inspection, lifecycle metadata, audit timeline, and retrieval/injection usage counts.
+- Added owner-scoped memory detail, audit, and access-event APIs, plus `status=all` and bounded list results for browser use.
+- Added soft-forget behavior: deleted memories remain auditable but are excluded from default listing and retrieval, with graph/vector cleanup queued through the existing projection outbox.
+- Added browser controls for confirm, reject, expire, project promotion, edit, and forget; expired, superseded, and forgotten records are inspection-only.
+- Added deterministic coverage for browser owner isolation, audit/access inspection, soft-forget idempotency, and projection cleanup scheduling.
+
 ### ✅ [2026-09-13] Expiry sweep lifecycle hardening
 
 - Added an idempotent repository sweep that formally transitions due active memories to `expired`, preserves their original validity deadline, and appends an `expired_by_sweep` audit event.

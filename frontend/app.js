@@ -33,6 +33,14 @@ const knowledgeBaseToggle = document.getElementById('knowledgeBaseToggle');
 const ytPrompt           = document.getElementById('ytPrompt');
 const ytConfirm          = document.getElementById('ytConfirm');
 const ytDismiss          = document.getElementById('ytDismiss');
+const memoryBrowserBtn   = document.getElementById('memoryBrowserBtn');
+const memoryDrawer       = document.getElementById('memoryDrawer');
+const memoryDrawerClose  = document.getElementById('memoryDrawerClose');
+const memoryDrawerProject = document.getElementById('memoryDrawerProject');
+const memoryStatusFilter = document.getElementById('memoryStatusFilter');
+const memoryScopeFilter  = document.getElementById('memoryScopeFilter');
+const memoryBrowserList  = document.getElementById('memoryBrowserList');
+const memoryBrowserDetail = document.getElementById('memoryBrowserDetail');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
@@ -45,6 +53,10 @@ function bindEvents() {
   newChatBtn.addEventListener('click', createNewSession);
   projectScopeInput.addEventListener('change', saveCurrentSessionProject);
   sendBtn.addEventListener('click', sendMessage);
+  memoryBrowserBtn.addEventListener('click', openMemoryBrowser);
+  memoryDrawerClose.addEventListener('click', () => { memoryDrawer.hidden = true; });
+  memoryStatusFilter.addEventListener('change', loadBrowserMemories);
+  memoryScopeFilter.addEventListener('change', loadBrowserMemories);
   toastClose.addEventListener('click', () => { uploadStatus.hidden = true; });
 
   // Attachment file picker
@@ -79,6 +91,137 @@ function bindEvents() {
       sendMessage();
     });
   });
+}
+
+// ── Memory browser ──────────────────────────────────────────────────────────
+async function openMemoryBrowser() {
+  const project = projectScopeInput.value.trim();
+  memoryDrawerProject.textContent = project ? ` · ${project}` : ' · all memories';
+  memoryDrawer.hidden = false;
+  memoryBrowserDetail.innerHTML = '<p>Select a memory to inspect its details and history.</p>';
+  await loadBrowserMemories();
+}
+
+async function loadBrowserMemories() {
+  const params = new URLSearchParams({ status: memoryStatusFilter.value, limit: '100' });
+  if (memoryScopeFilter.value) params.set('scope', memoryScopeFilter.value);
+  const project = projectScopeInput.value.trim();
+  if (project) params.set('project_scope', project);
+  memoryBrowserList.innerHTML = '<p class="memory-browser-empty">Loading…</p>';
+  try {
+    const res = await fetch(`${API}/api/memories?${params}`);
+    const data = await res.json();
+    const memories = data.memories || [];
+    memoryBrowserList.innerHTML = '';
+    if (!memories.length) {
+      memoryBrowserList.innerHTML = '<p class="memory-browser-empty">No memories match these filters.</p>';
+      return;
+    }
+    memories.forEach(memory => {
+      const row = document.createElement('button');
+      row.className = `memory-browser-row status-${memory.status}`;
+      const summary = memory.payload?.summary || memory.payload?.preferred_behavior ||
+        memory.payload?.subject || memory.payload?.canonical_name || memory.memory_id;
+      row.innerHTML = `<span class="memory-browser-row-title"></span><span class="memory-browser-row-meta"></span>`;
+      row.querySelector('.memory-browser-row-title').textContent = summary;
+      row.querySelector('.memory-browser-row-meta').textContent = `${memory.kind} · ${memory.status}`;
+      row.addEventListener('click', () => showMemoryDetail(memory.memory_id));
+      memoryBrowserList.appendChild(row);
+    });
+  } catch (err) {
+    memoryBrowserList.innerHTML = `<p class="memory-browser-empty">Could not load memories: ${err.message}</p>`;
+  }
+}
+
+async function showMemoryDetail(memoryId) {
+  memoryBrowserDetail.innerHTML = '<p>Loading memory details…</p>';
+  try {
+    const [memoryRes, auditRes, accessRes] = await Promise.all([
+      fetch(`${API}/api/memories/${memoryId}`),
+      fetch(`${API}/api/memories/${memoryId}/audit`),
+      fetch(`${API}/api/memories/${memoryId}/access-events`),
+    ]);
+    if (!memoryRes.ok) throw new Error('Memory is unavailable');
+    const memory = await memoryRes.json();
+    const audit = auditRes.ok ? (await auditRes.json()).events || [] : [];
+    const access = accessRes.ok ? (await accessRes.json()).events || [] : [];
+    renderMemoryDetail(memory, audit, access);
+  } catch (err) {
+    memoryBrowserDetail.innerHTML = `<p>Could not load details: ${err.message}</p>`;
+  }
+}
+
+function renderMemoryDetail(memory, audit, access) {
+  memoryBrowserDetail.innerHTML = '';
+  const title = document.createElement('h3');
+  title.textContent = `${memory.kind} · ${memory.status}`;
+  const metadata = document.createElement('p');
+  metadata.className = 'memory-detail-meta';
+  metadata.textContent = `${memory.scope}${memory.project_scope ? ` · ${memory.project_scope}` : ''} · expires ${memory.valid_to || 'never'}`;
+  const payload = document.createElement('pre');
+  payload.className = 'memory-detail-payload';
+  payload.textContent = JSON.stringify(memory.payload, null, 2);
+  const actions = document.createElement('div');
+  actions.className = 'memory-detail-actions';
+  addMemoryActions(actions, memory);
+  const timeline = document.createElement('div');
+  timeline.className = 'memory-detail-timeline';
+  timeline.innerHTML = '<h4>Audit history</h4>';
+  if (!audit.length) timeline.append(Object.assign(document.createElement('p'), { textContent: 'No audit events.' }));
+  audit.forEach(event => {
+    const item = document.createElement('p');
+    item.textContent = `${event.event_type} · ${event.actor_id || 'system'} · ${event.created_at}`;
+    timeline.appendChild(item);
+  });
+  const usage = document.createElement('p');
+  usage.className = 'memory-detail-usage';
+  usage.textContent = `Retrieved/injected ${access.length} time${access.length === 1 ? '' : 's'}.`;
+  memoryBrowserDetail.append(title, metadata, payload, actions, timeline, usage);
+}
+
+function addMemoryActions(actions, memory) {
+  const action = (label, method, suffix = '', body = null, confirmText = '') => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.addEventListener('click', async () => {
+      if (confirmText && !window.confirm(confirmText)) return;
+      try {
+        const res = await fetch(`${API}/api/memories/${memory.memory_id}${suffix}`, {
+          method, headers: body ? { 'Content-Type': 'application/json' } : {},
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || 'Action failed');
+        await loadBrowserMemories();
+        await showMemoryDetail(memory.memory_id);
+      } catch (err) { showToast('❌', err.message); }
+    });
+    actions.appendChild(button);
+  };
+  if (memory.status === 'candidate') {
+    action('Confirm', 'POST', '/confirm');
+    action('Reject', 'POST', '/reject');
+  }
+  if (memory.status === 'active') action('Expire', 'POST', '/expire', null, 'Expire this memory?');
+  if (memory.scope === 'session' && projectScopeInput.value.trim()) {
+    action('Promote to project', 'POST', '/promote', { scope: 'project', project_scope: projectScopeInput.value.trim() });
+  }
+  if (memory.status !== 'deleted') action('Forget', 'DELETE', '', null, 'Forget this memory? It will remain in the audit trail.');
+  if (['deleted', 'expired', 'superseded'].includes(memory.status)) return;
+  const edit = document.createElement('button');
+  edit.textContent = 'Edit payload';
+  edit.addEventListener('click', async () => {
+    const text = window.prompt('Edit the JSON payload:', JSON.stringify(memory.payload, null, 2));
+    if (text === null) return;
+    try {
+      const res = await fetch(`${API}/api/memories/${memory.memory_id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: JSON.parse(text) }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || 'Edit failed');
+      await loadBrowserMemories();
+      await showMemoryDetail(memory.memory_id);
+    } catch (err) { showToast('❌', `Edit failed: ${err.message}`); }
+  });
+  actions.appendChild(edit);
 }
 
 // ── YouTube URL detection ─────────────────────────────────────────────────────
@@ -244,7 +387,7 @@ async function loadSessionMessages(sessionId) {
     messageThread.innerHTML = '';
     emptyState = null;
     messages.forEach(message => {
-      appendBubble(message.role === 'assistant' ? 'bot' : 'user', message.content);
+      appendBubble(message.role === 'assistant' ? 'bot' : 'user', message.content, message.attachments || []);
     });
     scrollToBottom();
   } catch (err) {
@@ -284,6 +427,7 @@ async function sendMessage() {
   // well. Inline context keeps the current question fast and grounded; the
   // optional upload makes the document available to future retrievals.
   let inlineContext = '';
+  let attachments = [];
   if (pendingFile) {
     const file = pendingFile;
     const saveToKnowledgeBase = indexFileCheckbox.checked;
@@ -294,16 +438,22 @@ async function sendMessage() {
       // The indexed chunks will also serve the current question, so there is
       // no need to parse the file a second time for inline context.
       const indexed = await uploadFile(file);
-      if (indexed) knowledgeBaseToggle.checked = true;
-      else inlineContext = await parseFile(file);
+      if (indexed) {
+        knowledgeBaseToggle.checked = true;
+        attachments = [buildAttachmentMetadata(file, 'knowledge_base', { document_id: indexed.doc_id })];
+      } else {
+        inlineContext = await parseFile(file);
+        attachments = [buildAttachmentMetadata(file, 'inline')];
+      }
     } else {
       inlineContext = await parseFile(file);
+      attachments = [buildAttachmentMetadata(file, 'inline')];
     }
   }
 
   if (!content) return;   // file-only send with no text — nothing to ask
 
-  appendBubble('user', content);
+  appendBubble('user', content, attachments);
   messageInput.value = '';
   messageInput.style.height = 'auto';
   isStreaming = true;
@@ -325,6 +475,7 @@ async function sendMessage() {
         content,
         inline_context: inlineContext,
         use_knowledge_base: knowledgeBaseToggle.checked,
+        attachments,
       }),
     });
 
@@ -520,20 +671,20 @@ async function uploadFile(file) {
   try {
     const res = await fetch(`${API}/api/documents`, { method: 'POST', body: formData });
     const data = await res.json();
-    if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return false; }
+    if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return null; }
     const status = data.status === 'processing'
       ? await waitForDocument(data.doc_id, file.name)
       : data;
     if (status.status === 'error') {
       showToast('❌', `Indexing failed: ${status.message || 'Unknown error'}`);
-      return false;
+      return null;
     }
     showToast('✅', `Indexed ${status.chunk_count} chunks from "${file.name}"`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
-    return true;
+    return status;
   } catch (err) {
     showToast('❌', `Upload error: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -610,7 +761,44 @@ function formatSeconds(value) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function appendBubble(role, text) {
+function attachmentId() {
+  return globalThis.crypto?.randomUUID?.() ||
+    '00000000-0000-4000-8000-000000000000'.replace(/[018]/g, value =>
+      (Number(value) ^ (Math.random() * 16 >> Number(value) / 4)).toString(16));
+}
+
+function buildAttachmentMetadata(file, sourceMode, references = {}) {
+  return {
+    attachment_id: attachmentId(),
+    filename: file.name || 'attachment',
+    mime_type: file.type || 'application/octet-stream',
+    size_bytes: Number(file.size) || 0,
+    source_mode: sourceMode,
+    ...references,
+  };
+}
+
+function attachmentIconFor(filename) {
+  const ext = String(filename || '').split('.').pop().toLowerCase();
+  return MODALITY_ICONS[ext] || '📎';
+}
+
+function renderAttachmentChips(bubble, attachments) {
+  if (!attachments?.length) return;
+  const container = document.createElement('div');
+  container.className = 'message-attachments';
+  attachments.forEach(attachment => {
+    const chip = document.createElement('span');
+    chip.className = 'message-attachment-chip';
+    const mode = attachment.source_mode === 'knowledge_base' ? 'saved to knowledge base' : 'inline';
+    chip.textContent = `${attachmentIconFor(attachment.filename)} ${attachment.filename} · ${mode}`;
+    chip.title = `${attachment.mime_type || 'unknown type'} · ${attachment.size_bytes ?? 0} bytes`;
+    container.appendChild(chip);
+  });
+  bubble.appendChild(container);
+}
+
+function appendBubble(role, text, attachments = []) {
   const row = document.createElement('div');
   row.className = `message-row ${role}`;
   const avatar = document.createElement('div');
@@ -619,6 +807,7 @@ function appendBubble(role, text) {
   const bubble = document.createElement('div');
   bubble.className = `bubble ${role}`;
   bubble.textContent = text;
+  renderAttachmentChips(bubble, attachments);
   row.appendChild(avatar);
   row.appendChild(bubble);
   messageThread.appendChild(row);

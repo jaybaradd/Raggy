@@ -7,8 +7,9 @@ glance and avoids circular imports between routers.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
+from uuid import UUID
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
@@ -35,13 +36,31 @@ class SessionListResponse(BaseModel):
 
 # ── Messages ──────────────────────────────────────────────────────────────────
 
+class AttachmentMetadata(BaseModel):
+    """Durable metadata for a file associated with one chat turn.
+
+    The conversation store deliberately retains references and descriptive
+    metadata only. Raw bytes remain owned by the upload/ingestion subsystem.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: UUID
+    filename: str = Field(min_length=1, max_length=512)
+    mime_type: str = Field(min_length=1, max_length=255, pattern=r"^[^/\s]+/[^/\s]+$")
+    size_bytes: int = Field(ge=0, le=2_147_483_647)
+    source_mode: Literal["inline", "knowledge_base"]
+    document_id: str | None = Field(default=None, min_length=1, max_length=200)
+    evidence_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class SessionMessageResponse(BaseModel):
     message_id: str
     trace_id: str | None = None
     role: Literal["user", "assistant"]
     content: str
     created_at: str
-    attachments: list[dict] = Field(default_factory=list)
+    attachments: list[AttachmentMetadata] = Field(default_factory=list)
 
 
 class SessionMessagesResponse(BaseModel):
@@ -52,7 +71,7 @@ class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=32_000)
     inline_context: str = Field(default="")  # parsed content of a chat-attached file (bypasses retrieval)
     use_knowledge_base: bool = Field(default=False)
-    attachments: list[dict] = Field(default_factory=list)  # stub for Phase 3 inline multimodal
+    attachments: list[AttachmentMetadata] = Field(default_factory=list)
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────

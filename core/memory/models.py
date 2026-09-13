@@ -12,7 +12,7 @@ from core.memory.event_types import canonical_event_type
 
 MemoryKind = Literal["knowledge", "preference", "solution", "entity", "event"]
 MemoryScope = Literal["session", "project", "user", "organization"]
-MemoryStatus = Literal["candidate", "active", "superseded", "rejected", "expired"]
+MemoryStatus = Literal["candidate", "active", "superseded", "rejected", "expired", "deleted"]
 
 
 class KnowledgeAtom(BaseModel):
