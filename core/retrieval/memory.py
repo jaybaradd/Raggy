@@ -27,3 +27,9 @@ def retrieve_memories(query: str, *, owner_id: str = "default", session_id: str,
         memory["prompt_label"] = f"M{index}"
         parts.append(f"[{memory['prompt_label']} | {memory.get('kind')} | {memory.get('scope')}]\n{memory.get('memory_text', '')}")
     return MemoryRetrievalResult(context="\n\n".join(parts), memories=hits)
+
+
+async def build_memory_context(**kwargs):
+    """Plan safe memory context using exact and semantic candidate retrieval."""
+    from core.memory.planner import build_memory_context as _build_memory_context
+    return await _build_memory_context(**kwargs)

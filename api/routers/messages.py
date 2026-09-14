@@ -33,7 +33,7 @@ from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
 from db.repository_factory import repositories
 from core.retrieval.engine import RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve
-from core.retrieval.memory import retrieve_memories
+from core.retrieval.memory import build_memory_context
 memory_store = repositories.memories
 session_store = repositories.sessions
 
@@ -90,11 +90,14 @@ async def send_message(
     else:
         combined_context = retrieval_result.context
 
-    memory_result = retrieve_memories(
-        body.content,
+    memory_result = await build_memory_context(
+        query=body.content,
+        owner_id="default",
         session_id=session_id,
         project_id=session.get("project_id"),
         project_scope=session.get("project_scope"),
+        store=memory_store,
+        planner_provider=gemini_provider,
     )
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
@@ -102,9 +105,10 @@ async def send_message(
 
     for rank, memory in enumerate(memory_result.memories, start=1):
         logger.info(
-            "Memory trace %s: %s=%s rank=%d score=%.4f scope=%s",
+            "Memory trace %s: %s=%s rank=%d score=%.4f scope=%s source=%s relation=%s",
             trace_id, memory.get("prompt_label", "memory"), memory["memory_id"],
             rank, float(memory.get("score") or 0.0), memory.get("scope"),
+            memory.get("selection_source"), memory.get("selection_relation"),
         )
         memory_store.record_access_event(
             trace_id=trace_id,
@@ -115,6 +119,11 @@ async def send_message(
             prompt_label=memory.get("prompt_label"),
             rank=rank,
             score=memory.get("score"),
+            details={"candidate_source": memory.get("candidate_source"),
+                     "selection_source": memory.get("selection_source"),
+                     "selection_relation": memory.get("selection_relation"),
+                     "selection_confidence": memory.get("selection_confidence"),
+                     "planner_status": memory_result.planner_status},
         )
         memory_store.record_access_event(
             trace_id=trace_id,
@@ -125,9 +134,15 @@ async def send_message(
             prompt_label=memory.get("prompt_label"),
             rank=rank,
             score=memory.get("score"),
+            details={"candidate_source": memory.get("candidate_source"),
+                     "selection_source": memory.get("selection_source"),
+                     "selection_relation": memory.get("selection_relation"),
+                     "selection_confidence": memory.get("selection_confidence"),
+                     "planner_status": memory_result.planner_status},
         )
     if memory_result.memories:
-        logger.info("Memory trace %s: retrieved and injected %d memories", trace_id, len(memory_result.memories))
+        logger.info("Memory trace %s: injected %d memories via %s", trace_id,
+                    len(memory_result.memories), memory_result.planner_status)
 
     # Log what was retrieved so retrieval quality is visible in the terminal
     if inline:
@@ -185,6 +200,8 @@ async def send_message(
             messages=messages,
             sources=sources,
             memories=memory_result.memories,
+            memory_planner={"status": memory_result.planner_status, "rationale": memory_result.rationale},
+            reconciliation_hints=memory_result.reconciliation_hints or [],
             user_content=body.content,
             trace_id=trace_id,
         ),
@@ -203,6 +220,8 @@ async def _stream_response(
     messages: list[dict],
     sources: list[dict],
     memories: list[dict],
+    memory_planner: dict,
+    reconciliation_hints: list[dict],
     user_content: str,
     trace_id: str,
 ):
@@ -215,7 +234,7 @@ async def _stream_response(
         # Send structured provenance before token generation. Existing clients
         # can ignore this event and continue consuming token data events.
         yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'trace_id': trace_id, 'sources': sources})}\n\n"
-        yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'trace_id': trace_id, 'memories': memories})}\n\n"
+        yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'trace_id': trace_id, 'memories': memories, 'planner': memory_planner})}\n\n"
         async for token in gemini_provider.chat_stream(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,
@@ -247,6 +266,7 @@ async def _stream_response(
         user_content=user_content,
         assistant_content=complete_reply,
         evidence_refs=evidence_refs,
+        reconciliation_hints=reconciliation_hints,
     ))
 
     # Signal end of stream

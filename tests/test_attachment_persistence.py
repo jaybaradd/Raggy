@@ -36,9 +36,13 @@ def _message_router_without_runtime_services():
     engine.RetrievalResult = lambda context, chunks: types.SimpleNamespace(context=context, chunks=chunks)
     engine.build_rag_prompt = lambda content, _context: content
     engine.retrieve = lambda query: engine.RetrievalResult("", [])
-    memory_result = types.SimpleNamespace(context="", memories=[])
+    memory_result = types.SimpleNamespace(
+        context="", memories=[], planner_status="no_selection", rationale=None, reconciliation_hints=[],
+    )
     retrieval_memory = types.ModuleType("core.retrieval.memory")
-    retrieval_memory.retrieve_memories = lambda *args, **kwargs: memory_result
+    async def build_memory_context(*args, **kwargs):
+        return memory_result
+    retrieval_memory.build_memory_context = build_memory_context
     stubs = {
         "core.llm.gemini": types.SimpleNamespace(gemini_provider=object()),
         "core.memory.extractor": types.SimpleNamespace(MemoryExtractor=object),

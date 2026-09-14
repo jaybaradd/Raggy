@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from core.memory.identity import event_comparison_key, event_differences, event_identity_key, events_are_comparable
-from core.memory.models import (EntityMemory, EventMemory, KnowledgeAtom, MemoryRecord,
+from core.memory.identity import (event_comparison_key, event_differences, event_identity_key,
+                                  events_are_comparable, legacy_identifier_values)
+from core.memory.models import (EntityMemory, EventMemory, IdentifierReference, KnowledgeAtom, MemoryRecord,
                                 MemoryScope, MemoryStatus, PreferenceMemory, SolutionMemory)
 from db.postgres_migrations import PostgresMigrationRunner, memory_migrations
 
@@ -93,6 +94,24 @@ class PostgresMemoryRepository:
             ON CONFLICT(memory_id, target) DO UPDATE SET status='pending', error=NULL, locked_at=NULL,
                 locked_by=NULL, updated_at=EXCLUDED.updated_at""", (memory_id, target, now, now))
 
+    @staticmethod
+    def _sync_identifier_references(cursor: Any, record: MemoryRecord, now: datetime) -> None:
+        """Replace explicit identifiers in the same transaction as the memory row."""
+        cursor.execute("DELETE FROM memory_identifier_references WHERE memory_id=%s", (record.memory_id,))
+        if record.kind != "event":
+            return
+        references: dict[tuple[str, str], IdentifierReference] = {}
+        for reference in record.payload.identifier_references:
+            key = (reference.scheme, reference.normalized_value)
+            if key not in references or reference.confidence > references[key].confidence:
+                references[key] = reference
+        for reference in references.values():
+            cursor.execute("""INSERT INTO memory_identifier_references(
+                memory_id, scheme, normalized_value, raw_value, mention, confidence, created_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (record.memory_id, reference.scheme, reference.normalized_value, reference.value,
+                 reference.mention, reference.confidence, now))
+
     def _upsert(self, cursor: Any, record: MemoryRecord, *, event_type: str, actor_id: str | None,
                 details: dict | None, now: datetime) -> None:
         record.updated_at = now
@@ -107,6 +126,7 @@ class PostgresMemoryRepository:
             evidence_refs_json=EXCLUDED.evidence_refs_json, identity_key=EXCLUDED.identity_key, valid_to=EXCLUDED.valid_to,
             superseded_by=EXCLUDED.superseded_by, payload_json=EXCLUDED.payload_json, updated_at=EXCLUDED.updated_at""",
             self._params(record))
+        self._sync_identifier_references(cursor, record, now)
         self._audit(cursor, record.memory_id, event_type, actor_id, details, now)
         self._enqueue(cursor, record.memory_id, "qdrant", now)
         self._enqueue(cursor, record.memory_id, "graph", now)
@@ -165,16 +185,73 @@ class PostgresMemoryRepository:
             if comparable and (differences := event_differences(comparable, record)):
                 record.status, record.user_confirmed = "candidate", False
                 self._upsert(cursor, record, event_type="conflict_candidate_created", actor_id=actor_id, details=details, now=now)
-                conflict_type = "temporal_mismatch" if "temporal_scope" in differences else "location_mismatch"
                 cursor.execute("""INSERT INTO memory_conflicts(incoming_memory_id, existing_memory_id, conflict_type, status, details_json, created_at)
                     VALUES (%s,%s,%s,'open',%s::jsonb,%s) RETURNING conflict_id""",
-                    (record.memory_id, comparable.memory_id, conflict_type, json.dumps({"differences": differences}, sort_keys=True), now))
+                    (record.memory_id, comparable.memory_id, "claim_mismatch", json.dumps({"changed_claims": differences}, sort_keys=True), now))
                 conflict_id = cursor.fetchone()["conflict_id"]
                 self._audit(cursor, comparable.memory_id, "conflict_detected", actor_id,
-                            {"conflict_id": conflict_id, "incoming_memory_id": record.memory_id, "differences": differences}, now)
+                            {"conflict_id": conflict_id, "incoming_memory_id": record.memory_id, "changed_claims": differences}, now)
                 return EventCaptureResult("conflict", record, conflict_id)
             self._upsert(cursor, record, event_type=event_type, actor_id=actor_id, details=details, now=now)
             return EventCaptureResult("created", record)
+
+    def apply_event_reconciliation(self, record: MemoryRecord, *, outcome: str,
+                                   existing_memory_id: str | None, details: dict,
+                                   actor_id: str | None = None) -> EventCaptureResult:
+        """Atomically apply a validated post-turn reconciliation decision."""
+        if record.kind != "event":
+            raise ValueError("event reconciliation requires an event memory")
+        if outcome not in {"new", "duplicate", "update", "related", "uncertain"}:
+            raise ValueError(f"Unsupported reconciliation outcome: {outcome}")
+        if outcome in {"duplicate", "update", "related"} and not existing_memory_id:
+            raise ValueError(f"{outcome} reconciliation requires an existing memory")
+        record.identity_key, now = event_identity_key(record), self._now()
+        with self._connect() as connection, connection.cursor() as cursor:
+            existing = None
+            if existing_memory_id:
+                cursor.execute("SELECT * FROM memory_records WHERE memory_id=%s FOR UPDATE", (existing_memory_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"Memory '{existing_memory_id}' not found")
+                existing = self._record_from_row(row)
+                if existing.owner_id != record.owner_id:
+                    raise PermissionError("Reconciliation candidate belongs to another owner")
+            if outcome == "duplicate":
+                assert existing is not None
+                self._audit(cursor, existing.memory_id, "duplicate_detected", actor_id, details, now)
+                return EventCaptureResult("duplicate", existing)
+            if outcome == "update":
+                assert existing is not None
+                record.status, record.user_confirmed = "candidate", False
+                self._upsert(cursor, record, event_type="conflict_candidate_created", actor_id=actor_id,
+                             details=details, now=now)
+                cursor.execute("""INSERT INTO memory_conflicts(
+                    incoming_memory_id, existing_memory_id, conflict_type, status, details_json, created_at)
+                    VALUES (%s,%s,'claim_mismatch','open',%s::jsonb,%s) RETURNING conflict_id""",
+                    (record.memory_id, existing.memory_id, json.dumps(details, sort_keys=True), now))
+                conflict_id = cursor.fetchone()["conflict_id"]
+                self._audit(cursor, existing.memory_id, "conflict_detected", actor_id,
+                            {"conflict_id": conflict_id, "incoming_memory_id": record.memory_id, **details}, now)
+                return EventCaptureResult("conflict", record, conflict_id)
+            if outcome == "uncertain":
+                record.status, record.user_confirmed = "candidate", False
+                event_type = "reconciliation_uncertain"
+            else:
+                event_type = "reconciliation_created" if outcome == "new" else "reconciliation_related"
+            self._upsert(cursor, record, event_type=event_type, actor_id=actor_id, details=details, now=now)
+            if outcome == "related":
+                assert existing is not None
+                self._link(cursor, record.memory_id, existing.memory_id, "related", now)
+            return EventCaptureResult("created" if outcome in {"new", "related"} else "uncertain", record)
+
+    @staticmethod
+    def _link(cursor: Any, first_memory_id: str, second_memory_id: str,
+              relationship_type: str, now: datetime) -> None:
+        if relationship_type == "related":
+            first_memory_id, second_memory_id = sorted((first_memory_id, second_memory_id))
+        cursor.execute("""INSERT INTO memory_relationships(from_memory_id,to_memory_id,relationship_type,created_at)
+            VALUES (%s,%s,%s,%s) ON CONFLICT(from_memory_id,to_memory_id,relationship_type) DO NOTHING""",
+            (first_memory_id, second_memory_id, relationship_type, now))
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -185,6 +262,80 @@ class PostgresMemoryRepository:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT * FROM memory_records WHERE memory_id=%s AND owner_id=%s", (memory_id, owner_id)); row = cursor.fetchone()
         return self._record_from_row(row) if row else None
+
+    @staticmethod
+    def _candidate_scope_clause(*, session_id: str, project_id: str | None,
+                                project_scope: str | None) -> tuple[str, list[Any]]:
+        clauses = ["(records.scope='session' AND records.session_id=%s)", "records.scope='user'"]
+        params: list[Any] = [session_id]
+        if project_id:
+            clauses.append("(records.scope='project' AND records.project_id=%s)")
+            params.append(project_id)
+        if project_scope:
+            clauses.append("(records.scope='project' AND records.project_id IS NULL AND records.project_scope=%s)")
+            params.append(project_scope)
+        return f"({' OR '.join(clauses)})", params
+
+    def find_memory_candidates(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        project_id: str | None,
+        project_scope: str | None,
+        identifier_references: list[IdentifierReference],
+        limit: int = 10,
+    ) -> list[MemoryRecord]:
+        """Return exact, active identifier matches visible to the current chat."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        reference_keys = sorted({(reference.scheme, reference.normalized_value) for reference in identifier_references})
+        if not reference_keys:
+            return []
+        now = self._now()
+        scope_clause, scope_params = self._candidate_scope_clause(
+            session_id=session_id, project_id=project_id, project_scope=project_scope,
+        )
+        base_where = f"""records.owner_id=%s AND records.status='active' AND records.user_confirmed=TRUE
+            AND records.valid_from <= %s AND (records.valid_to IS NULL OR records.valid_to > %s)
+            AND {scope_clause}"""
+        reference_match_clause = " OR ".join(
+            "(refs.scheme=%s AND refs.normalized_value=%s)" for _ in reference_keys
+        )
+        reference_match_params = [value for key in reference_keys for value in key]
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                f"""SELECT records.*, COUNT(DISTINCT refs.normalized_value) AS match_count
+                    FROM memory_identifier_references refs
+                    JOIN memory_records records ON records.memory_id=refs.memory_id
+                    WHERE {base_where} AND ({reference_match_clause})
+                    GROUP BY records.memory_id
+                    ORDER BY match_count DESC, records.updated_at DESC LIMIT %s""",
+                (owner_id, now, now, *scope_params, *reference_match_params, limit),
+            )
+            candidates = [self._record_from_row(row) for row in cursor.fetchall()]
+            if len(candidates) >= limit:
+                return candidates
+            cursor.execute(
+                f"""SELECT records.* FROM memory_records records
+                    WHERE {base_where} AND records.kind='event' AND NOT EXISTS (
+                        SELECT 1 FROM memory_identifier_references refs WHERE refs.memory_id=records.memory_id
+                    ) ORDER BY records.updated_at DESC LIMIT 500""",
+                (owner_id, now, now, *scope_params),
+            )
+            legacy_rows = cursor.fetchall()
+        known_ids = {record.memory_id for record in candidates}
+        wanted = {value for scheme, value in reference_keys if scheme == "external_reference"}
+        if not wanted:
+            return candidates
+        for row in legacy_rows:
+            record = self._record_from_row(row)
+            if record.memory_id not in known_ids and isinstance(record.payload, EventMemory) and legacy_identifier_values(record.payload) & wanted:
+                candidates.append(record)
+                known_ids.add(record.memory_id)
+                if len(candidates) == limit:
+                    break
+        return candidates
 
     def _owned_locked(self, cursor: Any, memory_id: str, owner_id: str) -> MemoryRecord:
         cursor.execute("SELECT * FROM memory_records WHERE memory_id=%s AND owner_id=%s FOR UPDATE", (memory_id, owner_id)); row = cursor.fetchone()
@@ -373,8 +524,7 @@ class PostgresMemoryRepository:
             record.status, record.superseded_by = "superseded", replacement.memory_id
             self._upsert(cursor, record, event_type="superseded", actor_id=actor_id,
                          details={"replacement_memory_id": replacement.memory_id, "relationship": "contradiction"}, now=now)
-            cursor.execute("""INSERT INTO memory_relationships(from_memory_id,to_memory_id,relationship_type,created_at)
-                VALUES (%s,%s,'contradiction',%s)""", (record.memory_id, replacement.memory_id, now))
+            self._link(cursor, record.memory_id, replacement.memory_id, "contradiction", now)
         return record
 
     def backfill_project_ids(self, projects: dict[tuple[str, str], dict]) -> dict[str, int]:

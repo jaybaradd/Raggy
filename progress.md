@@ -2,6 +2,41 @@
 
 ---
 
+### ✅ [2026-09-14] Deterministic high-confidence correction fallback
+
+- A single selected, scope-eligible memory with planner relation `updates` and confidence at least 0.90 now creates a generic review conflict directly from claim differences; it no longer depends on a second structured LLM call succeeding.
+- The old active fact still remains unchanged until the existing conflict-resolution action is chosen. The response policy now treats new user operational facts as proposed corrections rather than dismissing them because older memory disagrees.
+
+### ✅ [2026-09-14] Implicit-reference reconciliation and truthful memory responses
+
+- The post-turn reconciler can now consider only event memories selected for the current turn's context, allowing high-confidence references such as “the meeting with my manager” to open a reviewable update conflict without a synthetic identifier.
+- Implicit matches require high reconciliation confidence and are scope-revalidated from the authoritative store; low-confidence or failed decisions remain reviewable candidates without a conflict or lifecycle mutation.
+- Memory extraction is grounded in the user turn alone, and the chat system prompt prohibits claims that a memory has already been updated or resolved before the lifecycle system confirms it.
+
+### ✅ [2026-09-14] Generalist memory reconciliation — Slice 4 lifecycle decisions
+
+- Post-turn event extraction now discovers exact identifier candidates before writing an incoming event, and uses a constrained reconciler to choose `new`, `duplicate`, `update`, `related`, or `uncertain`.
+- Material updates are stored as reviewable candidates with generic `claim_mismatch` conflicts; active memories are never overwritten automatically. Planner failures also retain a candidate rather than making a destructive guess.
+- Duplicate observations are auditable without duplicate records; related records create idempotent authoritative relationship links for later graph projection. SQLite and PostgreSQL share the lifecycle contract.
+
+### ✅ [2026-09-14] Generalist memory reconciliation — Slice 3 pre-response planner
+
+- Added a bounded pre-response planner that combines deterministic identifier candidates with scoped Qdrant semantic suggestions, then accepts only structured, candidate-set-bounded selections for prompt injection.
+- Semantic hits are revalidated against the authoritative memory repository before planning; unavailable or invalid planning safely falls back to high-confidence exact identifier matches only.
+- Memory SSE/access provenance now includes candidate source, planner selection relation/confidence, planner status, and a short rationale for inspection.
+
+### ✅ [2026-09-14] Generalist memory reconciliation — Slice 2 identifier candidates
+
+- Added a normalized, authoritative `memory_identifier_references` index in SQLite and PostgreSQL, synchronized atomically with every memory write.
+- Added exact, active, confirmed, unexpired candidate lookup across the current session, user scope, and project scope; stable project IDs are authoritative while name matching is legacy-only.
+- Preserved a bounded read-only fallback for legacy event entity strings without rewriting archived records.
+
+### ✅ [2026-09-14] Generalist memory reconciliation — Slice 1 contract foundation
+
+- Replaced the shipping-specific event alias taxonomy with lossless label normalization; descriptive event labels no longer gate project-memory capture.
+- Added additive `identifier_references` and explicit `claims` to event payloads, retaining raw mentions and normalized values for the next identifier-index and reconciliation slices.
+- Updated extraction guidance and semantic projection text while retaining existing event fields and storage compatibility.
+
 ### ✅ [2026-09-14] Project-memory retrieval filter correction
 
 - Corrected the Qdrant eligibility filter so project memories retain `scope=project` while project ID/name are applied as separate constraints.

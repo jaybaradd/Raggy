@@ -20,7 +20,11 @@ def memory_text(record: MemoryRecord) -> str:
     if record.kind == "event":
         entities = ", ".join(payload.entities)
         locations = ", ".join(payload.locations)
+        identifiers = ", ".join(reference.value for reference in payload.identifier_references)
+        claims = "; ".join(f"{claim.attribute}={claim.value}" for claim in payload.claims)
         temporal = f" Timing: {payload.temporal_scope}." if payload.temporal_scope else ""
-        return f"Project event ({payload.event_type}): {payload.summary}. Entities: {entities}. Locations: {locations}.{temporal}"
+        identifier_text = f" Identifiers: {identifiers}." if identifiers else ""
+        claim_text = f" Claims: {claims}." if claims else ""
+        return f"Project event ({payload.event_type}): {payload.summary}. Entities: {entities}. Locations: {locations}.{temporal}{identifier_text}{claim_text}"
     aliases = ", ".join(payload.aliases)
     return f"Entity: {payload.canonical_name}. Type: {payload.entity_type}. Aliases: {aliases}."

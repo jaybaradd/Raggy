@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from core.memory.extractor import MemoryCandidate
-from core.memory.event_types import is_known_event_type
 
 
 EVENT_AUTO_PROMOTE_CONFIDENCE = 0.75
@@ -43,8 +42,6 @@ def decide_project_capture(*, candidate: MemoryCandidate, project_scope: str | N
         return _candidate("no_project_scope")
 
     now = captured_at or datetime.now(timezone.utc)
-    if candidate.kind == "event" and not is_known_event_type(str(candidate.payload.get("event_type", ""))):
-        return _candidate("unclassified_event_type")
     if candidate.kind == "event" and candidate.confidence >= EVENT_AUTO_PROMOTE_CONFIDENCE:
         return CaptureDecision(
             scope="project",

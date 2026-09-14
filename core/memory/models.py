@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.memory.event_types import canonical_event_type
+from core.memory.event_types import normalize_event_label
 
 MemoryKind = Literal["knowledge", "preference", "solution", "entity", "event"]
 MemoryScope = Literal["session", "project", "user", "organization"]
@@ -50,6 +50,51 @@ class EntityMemory(BaseModel):
     graph_links: list[str] = Field(default_factory=list)
 
 
+def _normalise_identifier(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _normalise_claim_value(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+class IdentifierReference(BaseModel):
+    """An extracted identifier and its source wording.
+
+    The durable matching key is ``normalized_value``. ``mention`` preserves
+    the exact wording so later resolution remains explainable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    scheme: str = Field(default="external_reference", min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=500)
+    normalized_value: str = Field(default="", max_length=500)
+    mention: str | None = Field(default=None, max_length=1_000)
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def normalise_value(self) -> "IdentifierReference":
+        self.normalized_value = self.normalized_value or _normalise_identifier(self.value)
+        if not self.normalized_value:
+            raise ValueError("identifier reference must contain an alphanumeric value")
+        return self
+
+
+class EventClaim(BaseModel):
+    """One explicit assertion about an event, retained without a fixed ontology."""
+
+    model_config = ConfigDict(extra="forbid")
+    attribute: str = Field(min_length=1, max_length=500)
+    value: str = Field(min_length=1, max_length=4_000)
+    normalized_value: str | None = Field(default=None, max_length=4_000)
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def normalise_value(self) -> "EventClaim":
+        self.normalized_value = self.normalized_value or _normalise_claim_value(self.value)
+        return self
+
+
 class EventMemory(BaseModel):
     """A user-stated, time-bound project event such as a shipment or deadline."""
 
@@ -60,6 +105,8 @@ class EventMemory(BaseModel):
     entities: list[str] = Field(default_factory=list, max_length=20)
     locations: list[str] = Field(default_factory=list, max_length=20)
     temporal_scope: str | None = Field(default=None, max_length=500)
+    identifier_references: list[IdentifierReference] = Field(default_factory=list, max_length=20)
+    claims: list[EventClaim] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="before")
     @classmethod
@@ -70,7 +117,7 @@ class EventMemory(BaseModel):
         raw = str(payload.get("event_type", "")).strip()
         if raw:
             payload.setdefault("event_type_raw", raw)
-            payload["event_type"] = canonical_event_type(raw)
+            payload["event_type"] = normalize_event_label(raw)
         return payload
 
 

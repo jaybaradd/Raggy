@@ -10,6 +10,8 @@ raggy_memory.sqlite3-shm
 raggy_memory.sqlite3-wal
 raggy_graph_projection.sqlite3
 raggy_graph_postgres.sqlite3
+raggy_graph_postgres.sqlite3-shm
+raggy_graph_postgres.sqlite3-wal
 qdrant_data/
 qdrant_postgres_data/
 uploaded_files_postgres/

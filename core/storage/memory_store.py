@@ -12,10 +12,11 @@ from threading import Lock
 from config import settings
 from db.migrations import Migration, MigrationRunner
 from core.memory.models import (
-    EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
+    EventMemory, EntityMemory, IdentifierReference, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
     PreferenceMemory, SolutionMemory,
 )
-from core.memory.identity import events_are_comparable, event_differences, event_identity_key
+from core.memory.identity import (events_are_comparable, event_differences, event_identity_key,
+                                  legacy_identifier_values)
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,8 @@ class MemoryStore:
                     FOREIGN KEY(from_memory_id) REFERENCES memory_records(memory_id),
                     FOREIGN KEY(to_memory_id) REFERENCES memory_records(memory_id)
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_relationship
+                    ON memory_relationships(from_memory_id, to_memory_id, relationship_type);
                 CREATE TABLE IF NOT EXISTS memory_conflicts (
                     conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     incoming_memory_id TEXT NOT NULL,
@@ -127,6 +130,25 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_projection_jobs_pending
                     ON memory_projection_jobs(status, updated_at);
+                CREATE TABLE IF NOT EXISTS memory_identifier_references (
+                    reference_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    memory_id TEXT NOT NULL REFERENCES memory_records(memory_id) ON DELETE CASCADE,
+                    scheme TEXT NOT NULL,
+                    normalized_value TEXT NOT NULL,
+                    raw_value TEXT NOT NULL,
+                    mention TEXT,
+                    confidence REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(memory_id, scheme, normalized_value)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_identifier_lookup
+                    ON memory_identifier_references(scheme, normalized_value, memory_id);
+                CREATE INDEX IF NOT EXISTS idx_memory_candidate_project
+                    ON memory_records(owner_id, status, user_confirmed, project_id);
+                CREATE INDEX IF NOT EXISTS idx_memory_candidate_project_scope
+                    ON memory_records(owner_id, status, user_confirmed, project_scope);
+                CREATE INDEX IF NOT EXISTS idx_memory_candidate_session
+                    ON memory_records(owner_id, status, user_confirmed, session_id);
             """)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
             if "project_id" not in columns:
@@ -146,6 +168,8 @@ class MemoryStore:
                 Migration(1, "legacy_memory_schema_baseline", lambda _: None),
                 Migration(2, "event_identity_and_conflicts", lambda _: None),
                 Migration(3, "project_id_propagation", lambda _: None),
+                Migration(4, "memory_identifier_references", lambda _: None),
+                Migration(5, "memory_relationship_uniqueness", lambda _: None),
             ])
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
                             event_type: str, message_id: str | None = None,
@@ -220,9 +244,33 @@ class MemoryStore:
                     identity_key=excluded.identity_key, valid_to=excluded.valid_to, superseded_by=excluded.superseded_by,
                     payload_json=excluded.payload_json, updated_at=excluded.updated_at
             """, self._params(record))
+        self._sync_identifier_references_locked(connection, record, now)
         self._audit_locked(connection, record.memory_id, event_type, actor_id, details, now)
         self._enqueue_projection_locked(connection, record.memory_id, "qdrant", now.isoformat())
         self._enqueue_projection_locked(connection, record.memory_id, "graph", now.isoformat())
+
+    @staticmethod
+    def _sync_identifier_references_locked(connection: sqlite3.Connection, record: MemoryRecord,
+                                           now: datetime) -> None:
+        """Replace explicit references atomically with their parent memory write."""
+        connection.execute("DELETE FROM memory_identifier_references WHERE memory_id = ?", (record.memory_id,))
+        if record.kind != "event":
+            return
+        references: dict[tuple[str, str], IdentifierReference] = {}
+        for reference in record.payload.identifier_references:
+            key = (reference.scheme, reference.normalized_value)
+            if key not in references or reference.confidence > references[key].confidence:
+                references[key] = reference
+        connection.executemany(
+            """INSERT INTO memory_identifier_references (
+                memory_id, scheme, normalized_value, raw_value, mention, confidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (record.memory_id, reference.scheme, reference.normalized_value, reference.value,
+                 reference.mention, reference.confidence, now.isoformat())
+                for reference in references.values()
+            ],
+        )
 
     @staticmethod
     def _audit_locked(connection: sqlite3.Connection, memory_id: str, event_type: str,
@@ -265,23 +313,84 @@ class MemoryStore:
                     record.updated_at = now
                     self._upsert_locked(connection, record, event_type="conflict_candidate_created",
                                         actor_id=actor_id, details=details, now=now)
-                    conflict_type = "temporal_mismatch" if "temporal_scope" in differences else "location_mismatch"
                     cursor = connection.execute(
                         """INSERT INTO memory_conflicts (
                             incoming_memory_id, existing_memory_id, conflict_type, status, details_json, created_at
                         ) VALUES (?, ?, ?, 'open', ?, ?)""",
-                        (record.memory_id, comparable.memory_id, conflict_type,
-                         json.dumps({"differences": differences}, sort_keys=True), now.isoformat()),
+                        (record.memory_id, comparable.memory_id, "claim_mismatch",
+                         json.dumps({"changed_claims": differences}, sort_keys=True), now.isoformat()),
                     )
                     self._audit_locked(connection, comparable.memory_id, "conflict_detected", actor_id,
                                        {"conflict_id": cursor.lastrowid, "incoming_memory_id": record.memory_id,
-                                        "differences": differences}, now)
+                                        "changed_claims": differences}, now)
                     return EventCaptureResult("conflict", record, cursor.lastrowid)
 
             record.updated_at = now
             self._upsert_locked(connection, record, event_type=event_type, actor_id=actor_id,
                                 details=details, now=now)
         return EventCaptureResult("created", record)
+
+    def apply_event_reconciliation(self, record: MemoryRecord, *, outcome: str,
+                                   existing_memory_id: str | None, details: dict,
+                                   actor_id: str | None = None) -> EventCaptureResult:
+        """Atomically apply a validated post-turn reconciliation decision."""
+        if record.kind != "event":
+            raise ValueError("event reconciliation requires an event memory")
+        if outcome not in {"new", "duplicate", "update", "related", "uncertain"}:
+            raise ValueError(f"Unsupported reconciliation outcome: {outcome}")
+        if outcome in {"duplicate", "update", "related"} and not existing_memory_id:
+            raise ValueError(f"{outcome} reconciliation requires an existing memory")
+        record.identity_key = event_identity_key(record)
+        now = datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            existing = None
+            if existing_memory_id:
+                row = connection.execute("SELECT * FROM memory_records WHERE memory_id = ?", (existing_memory_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"Memory '{existing_memory_id}' not found")
+                existing = self._from_row(row)
+                if existing.owner_id != record.owner_id:
+                    raise PermissionError("Reconciliation candidate belongs to another owner")
+            if outcome == "duplicate":
+                assert existing is not None
+                self._audit_locked(connection, existing.memory_id, "duplicate_detected", actor_id, details, now)
+                return EventCaptureResult("duplicate", existing)
+            if outcome == "update":
+                assert existing is not None
+                record.status, record.user_confirmed = "candidate", False
+                self._upsert_locked(connection, record, event_type="conflict_candidate_created",
+                                    actor_id=actor_id, details=details, now=now)
+                cursor = connection.execute(
+                    """INSERT INTO memory_conflicts (
+                        incoming_memory_id, existing_memory_id, conflict_type, status, details_json, created_at
+                    ) VALUES (?, ?, 'claim_mismatch', 'open', ?, ?)""",
+                    (record.memory_id, existing.memory_id, json.dumps(details, sort_keys=True), now.isoformat()),
+                )
+                self._audit_locked(connection, existing.memory_id, "conflict_detected", actor_id,
+                                   {"conflict_id": cursor.lastrowid, "incoming_memory_id": record.memory_id, **details}, now)
+                return EventCaptureResult("conflict", record, cursor.lastrowid)
+            if outcome == "uncertain":
+                record.status, record.user_confirmed = "candidate", False
+                event_type = "reconciliation_uncertain"
+            else:
+                event_type = "reconciliation_created" if outcome == "new" else "reconciliation_related"
+            self._upsert_locked(connection, record, event_type=event_type, actor_id=actor_id, details=details, now=now)
+            if outcome == "related":
+                assert existing is not None
+                self._link_locked(connection, record.memory_id, existing.memory_id, "related", now)
+            return EventCaptureResult("created" if outcome in {"new", "related"} else "uncertain", record)
+
+    @staticmethod
+    def _link_locked(connection: sqlite3.Connection, first_memory_id: str, second_memory_id: str,
+                     relationship_type: str, now: datetime) -> None:
+        """Create a stable, idempotent link for graph projection."""
+        if relationship_type == "related":
+            first_memory_id, second_memory_id = sorted((first_memory_id, second_memory_id))
+        connection.execute(
+            """INSERT OR IGNORE INTO memory_relationships
+               (from_memory_id, to_memory_id, relationship_type, created_at) VALUES (?, ?, ?, ?)""",
+            (first_memory_id, second_memory_id, relationship_type, now.isoformat()),
+        )
 
     @staticmethod
     def _enqueue_projection_locked(connection: sqlite3.Connection, memory_id: str,
@@ -479,6 +588,95 @@ class MemoryStore:
         record = self.get(memory_id)
         return record if record and record.owner_id == owner_id else None
 
+    @staticmethod
+    def _candidate_scope_clause(*, session_id: str, project_id: str | None,
+                                project_scope: str | None) -> tuple[str, list[object]]:
+        clauses = ["(records.scope = 'session' AND records.session_id = ?)", "records.scope = 'user'"]
+        params: list[object] = [session_id]
+        if project_id:
+            clauses.append("(records.scope = 'project' AND records.project_id = ?)")
+            params.append(project_id)
+        # Name matching is solely for legacy records that predate stable IDs.
+        if project_scope:
+            clauses.append("(records.scope = 'project' AND records.project_id IS NULL AND records.project_scope = ?)")
+            params.append(project_scope)
+        return f"({' OR '.join(clauses)})", params
+
+    def find_memory_candidates(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        project_id: str | None,
+        project_scope: str | None,
+        identifier_references: list[IdentifierReference],
+        limit: int = 10,
+    ) -> list[MemoryRecord]:
+        """Find exact, currently eligible memory candidates by stable reference.
+
+        Indexed explicit references are returned first. A bounded scan of
+        legacy event entities preserves read compatibility without rewriting
+        old records into the new identifier table.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        reference_keys = sorted({(reference.scheme, reference.normalized_value) for reference in identifier_references})
+        if not reference_keys:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+        scope_clause, scope_params = self._candidate_scope_clause(
+            session_id=session_id, project_id=project_id, project_scope=project_scope,
+        )
+        reference_match_clause = " OR ".join(
+            "(refs.scheme = ? AND refs.normalized_value = ?)" for _ in reference_keys
+        )
+        reference_match_params = [value for key in reference_keys for value in key]
+        base_where = f"""records.owner_id = ? AND records.status = 'active'
+            AND records.user_confirmed = 1 AND records.valid_from <= ?
+            AND (records.valid_to IS NULL OR records.valid_to > ?) AND {scope_clause}"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT records.*, COUNT(DISTINCT refs.normalized_value) AS match_count
+                    FROM memory_identifier_references AS refs
+                    JOIN memory_records AS records ON records.memory_id = refs.memory_id
+                    WHERE {base_where} AND ({reference_match_clause})
+                    GROUP BY records.memory_id
+                    ORDER BY match_count DESC, records.updated_at DESC LIMIT ?""",
+                [owner_id, now, now, *scope_params, *reference_match_params, limit],
+            ).fetchall()
+            candidates = [self._from_row(row) for row in rows]
+            if len(candidates) >= limit:
+                return candidates
+
+            # Legacy rows have no explicit references. Their entity strings are
+            # scanned only after indexed lookup and only within the same scope.
+            legacy_rows = connection.execute(
+                f"""SELECT records.* FROM memory_records AS records
+                    WHERE {base_where} AND records.kind = 'event'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM memory_identifier_references AS refs
+                        WHERE refs.memory_id = records.memory_id
+                    )
+                    ORDER BY records.updated_at DESC LIMIT 500""",
+                [owner_id, now, now, *scope_params],
+            ).fetchall()
+        known_ids = {record.memory_id for record in candidates}
+        # Legacy entity strings do not carry a scheme. They are compatible only
+        # with the default general-purpose external-reference scheme.
+        wanted = {value for scheme, value in reference_keys if scheme == "external_reference"}
+        if not wanted:
+            return candidates
+        for row in legacy_rows:
+            record = self._from_row(row)
+            if record.memory_id in known_ids or not isinstance(record.payload, EventMemory):
+                continue
+            if legacy_identifier_values(record.payload) & wanted:
+                candidates.append(record)
+                known_ids.add(record.memory_id)
+                if len(candidates) == limit:
+                    break
+        return candidates
+
     def list(self, *, owner_id: str, scope: MemoryScope | None = None,
              session_id: str | None = None, project_id: str | None = None, project_scope: str | None = None,
              status: MemoryStatus | None = "active", kind: str | None = None,
@@ -624,10 +822,7 @@ class MemoryStore:
         self.upsert(record, event_type="superseded", actor_id=actor_id,
                     details={"replacement_memory_id": replacement.memory_id, "relationship": "contradiction"})
         with self._lock, self._connect() as connection:
-            connection.execute(
-                "INSERT INTO memory_relationships (from_memory_id, to_memory_id, relationship_type, created_at) VALUES (?, ?, ?, ?)",
-                (record.memory_id, replacement.memory_id, "contradiction", datetime.now(timezone.utc).isoformat()),
-            )
+            self._link_locked(connection, record.memory_id, replacement.memory_id, "contradiction", datetime.now(timezone.utc))
         return record
 
     def _owned(self, memory_id: str, owner_id: str) -> MemoryRecord:

@@ -102,11 +102,13 @@ class Phase2EMemoryTests(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.source_turn_id, "turn-solution")
 
-    def test_extraction_policy_keeps_assistant_document_facts_out_of_user_memory(self) -> None:
+    def test_extraction_policy_uses_only_the_user_turn(self) -> None:
         prompt = MemoryExtractor._prompt("session", "Remember I have a shipment coming.",
                                          "A document says peroxisomes oxidize lipids.", ["evidence-1"])
-        self.assertIn("facts that appear only in the assistant answer", prompt)
+        self.assertIn("assistant response is intentionally not supplied", prompt)
         self.assertIn("document-ingestion pipeline", prompt)
+        self.assertNotIn("peroxisomes oxidize lipids", prompt)
+
 
 
 if __name__ == "__main__":

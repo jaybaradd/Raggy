@@ -50,6 +50,8 @@ class MemoryExtractor:
         assistant_content: str,
         evidence_refs: list[str],
     ) -> ExtractionBatch:
+        # Assistant wording may speculate about, summarize, or merely confirm a
+        # fact. Durable chat memory is grounded in the user's turn only.
         prompt = self._prompt(session_id, user_content, assistant_content, evidence_refs)
         raw = await self.provider.generate_json(prompt)
         batch = ExtractionBatch.model_validate(raw)
@@ -82,8 +84,11 @@ Allowed candidate shapes:
   `steps` (array of strings), `outcome` (string or null), `verification_evidence` (array of strings).
 - entity payload: `canonical_name` (string), `entity_type` (string), `aliases` (array of strings),
   `external_ids` (object of strings), `graph_links` (array of strings).
-- event payload: `event_type` (string), `summary` (string), `entities` (array of strings),
-  `locations` (array of strings), `temporal_scope` (string or null).
+- event payload: `event_type` (descriptive string), `summary` (string), `entities` (array of strings),
+  `locations` (array of strings), `temporal_scope` (string or null), `identifier_references` (array),
+  `claims` (array). Each identifier reference has `scheme`, `value`, `mention`, and `confidence`.
+  Each claim has `attribute`, `value`, and `confidence`. Preserve descriptive labels; do not invent
+  a closed event taxonomy.
 
 Representative output examples (do not copy their content):
 {{
@@ -143,7 +148,9 @@ Representative output examples (do not copy their content):
         "summary": "A shipment is arriving by air cargo from a named city",
         "entities": ["shipment", "air cargo"],
         "locations": ["a named city"],
-        "temporal_scope": "in two days"
+        "temporal_scope": "in two days",
+        "identifier_references": [],
+        "claims": [{{"attribute": "expected_time", "value": "in two days", "confidence": 0.9}}]
       }},
       "evidence_refs": []
     }}
@@ -152,7 +159,7 @@ Representative output examples (do not copy their content):
 
 Rules:
 - Extract only explicit statements or claims directly supported by the turn/evidence.
-- For conversation memory, extract only durable statements made or explicitly adopted by the USER. Do not turn facts that appear only in the assistant answer, retrieved documents, or citations into personal memory candidates.
+- For conversation memory, extract only durable statements made explicitly by the USER below. The assistant response is intentionally not supplied. Questions, acknowledgements, requests for status, and requests to update memory are not operational-event assertions.
 - Document-derived knowledge atoms belong to the document-ingestion pipeline, not this post-chat user-memory extraction job.
 - Create one atomic subject-predicate-object claim per knowledge candidate; never put a nested resume, profile, list, or document object in a payload.
 - Use `event` only for concrete, user-stated operational events such as shipments, deliveries, meetings, deadlines, reservations, or incidents. Do not use it for a question, a rumour, or a fact found only in documents.
@@ -164,8 +171,7 @@ Rules:
 Session: {session_id}
 USER:
 {user_content}
-ASSISTANT:
-{assistant_content}"""
+"""
 
 
 def _normalize_payload(kind: str, payload: dict) -> dict:
@@ -196,4 +202,11 @@ def _normalize_payload(kind: str, payload: dict) -> dict:
         normalized["canonical_name"] = normalized["name"]
     if kind == "entity":
         normalized.pop("name", None)
+    if kind == "event":
+        if "identifier_references" not in normalized and isinstance(normalized.get("identifier_refs"), list):
+            normalized["identifier_references"] = normalized["identifier_refs"]
+        if "claims" not in normalized and isinstance(normalized.get("event_claims"), list):
+            normalized["claims"] = normalized["event_claims"]
+        normalized.pop("identifier_refs", None)
+        normalized.pop("event_claims", None)
     return normalized

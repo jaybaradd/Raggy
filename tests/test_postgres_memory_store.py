@@ -8,7 +8,8 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from core.memory.models import EventMemory, MemoryRecord, PreferenceMemory
+from core.memory.models import EventMemory, IdentifierReference, MemoryRecord, PreferenceMemory
+from core.memory.reconciliation import ReconciliationDecision, reconciliation_details
 
 RUN = os.getenv("RUN_POSTGRES_INTEGRATION_TESTS") == "1"
 URL = os.getenv("POSTGRES_DATABASE_URL", "")
@@ -84,6 +85,69 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         self.assertIsNone(self.store.get_owned(record.memory_id, owner_id="owner-b"))
         with self.assertRaises(KeyError):
             self.store.list_audit_events(record.memory_id, owner_id="owner-b")
+
+    def test_identifier_candidates_are_project_scoped_and_restart_safe(self) -> None:
+        record = self._event()
+        record.project_id = "imports-id"
+        record.payload.identifier_references = [IdentifierReference(value="EK-420", mention="order EK-420")]
+        self.store.upsert(record)
+
+        candidates = self.store.find_memory_candidates(
+            owner_id="owner-a", session_id="other-chat", project_id="imports-id", project_scope="imports",
+            identifier_references=[IdentifierReference(value="EK420")],
+        )
+        self.assertEqual([item.memory_id for item in candidates], [record.memory_id])
+
+        from db.postgres_memory_store import PostgresMemoryRepository
+        restarted = PostgresMemoryRepository(URL, schema=self.schema)
+        self.assertEqual(
+            [item.memory_id for item in restarted.find_memory_candidates(
+                owner_id="owner-a", session_id="other-chat", project_id="wrong-project", project_scope="imports",
+                identifier_references=[IdentifierReference(value="EK420")],
+            )],
+            [],
+        )
+
+    def test_reconciliation_update_keeps_existing_fact_active(self) -> None:
+        existing = self._event("Tuesday")
+        existing.payload.identifier_references = [IdentifierReference(value="INC-19")]
+        self.store.upsert(existing)
+        incoming = self._event("Thursday")
+        incoming.payload.event_type = "incident update"
+        incoming.payload.identifier_references = [IdentifierReference(value="INC19")]
+        decision = ReconciliationDecision(
+            outcome="update", existing_memory_id=existing.memory_id,
+            matched_identifier_values=["inc19"],
+            changed_claims={"expected_arrival": {"existing": "Tuesday", "incoming": "Thursday"}},
+            confidence=0.97, reason="Same incident reference with changed status.",
+        )
+        result = self.store.apply_event_reconciliation(
+            incoming, outcome=decision.outcome, existing_memory_id=existing.memory_id,
+            details=reconciliation_details(decision, incoming), actor_id="system",
+        )
+        self.assertEqual(result.outcome, "conflict")
+        conflict = self.store.get_conflict(result.conflict_id, owner_id="owner-a")
+        self.assertEqual(conflict["conflict_type"], "claim_mismatch")
+        self.assertEqual(self.store.get(existing.memory_id).status, "active")
+        self.assertEqual(self.store.get(incoming.memory_id).status, "candidate")
+
+    def test_related_link_is_idempotent(self) -> None:
+        existing = self._event("Tuesday")
+        existing.payload.identifier_references = [IdentifierReference(value="MTG-88")]
+        self.store.upsert(existing)
+        related = self._event("Friday")
+        related.payload.event_type = "meeting note"
+        related.payload.identifier_references = [IdentifierReference(value="MTG88")]
+        decision = ReconciliationDecision(outcome="related", existing_memory_id=existing.memory_id,
+                                          confidence=0.9, reason="Related operational note.")
+        for _ in range(2):
+            self.store.apply_event_reconciliation(
+                related, outcome="related", existing_memory_id=existing.memory_id,
+                details=reconciliation_details(decision, related), actor_id="system",
+            )
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) AS count FROM memory_relationships WHERE relationship_type='related'")
+            self.assertEqual(cursor.fetchone()["count"], 1)
 
 
 if __name__ == "__main__":

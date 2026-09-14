@@ -53,7 +53,8 @@ class EventCaptureTests(unittest.TestCase):
         self.assertEqual(conflict.record.status, "candidate")
         open_conflicts = self.store.list_conflicts(owner_id="user-1")
         self.assertEqual(open_conflicts[0]["existing_memory_id"], existing.record.memory_id)
-        self.assertIn("temporal_scope", open_conflicts[0]["details"]["differences"])
+        self.assertEqual(open_conflicts[0]["conflict_type"], "claim_mismatch")
+        self.assertIn("temporal_scope", open_conflicts[0]["details"]["changed_claims"])
 
     def test_conflict_resolution_supersedes_old_event_and_activates_new_one(self) -> None:
         existing = self.store.capture_event(self._shipment(temporal="Friday"), event_type="auto_promoted_project_event")

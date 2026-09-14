@@ -124,7 +124,27 @@ def memory_migrations() -> list[PostgresMigration]:
             locked_at TIMESTAMPTZ, locked_by TEXT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
             UNIQUE(memory_id, target))""")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_projection_jobs_pending ON memory_projection_jobs(status, updated_at)")
-    return [PostgresMigration(1, "memory_records_lifecycle_and_outbox", initial)]
+    def identifier_references(cursor: Any) -> None:
+        cursor.execute("""CREATE TABLE IF NOT EXISTS memory_identifier_references (
+            reference_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            memory_id TEXT NOT NULL REFERENCES memory_records(memory_id) ON DELETE CASCADE,
+            scheme TEXT NOT NULL, normalized_value TEXT NOT NULL, raw_value TEXT NOT NULL,
+            mention TEXT, confidence DOUBLE PRECISION NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(memory_id, scheme, normalized_value))""")
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_memory_identifier_lookup
+            ON memory_identifier_references(scheme, normalized_value, memory_id)""")
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_memory_candidate_project
+            ON memory_records(owner_id, status, user_confirmed, project_id)""")
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_memory_candidate_project_scope
+            ON memory_records(owner_id, status, user_confirmed, project_scope)""")
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_memory_candidate_session
+            ON memory_records(owner_id, status, user_confirmed, session_id)""")
+    def relationship_uniqueness(cursor: Any) -> None:
+        cursor.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_relationship
+            ON memory_relationships(from_memory_id, to_memory_id, relationship_type)""")
+    return [PostgresMigration(1, "memory_records_lifecycle_and_outbox", initial),
+            PostgresMigration(2, "memory_identifier_references", identifier_references),
+            PostgresMigration(3, "memory_relationship_uniqueness", relationship_uniqueness)]
 
 
 def evidence_migrations() -> list[PostgresMigration]:
