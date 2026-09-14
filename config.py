@@ -7,11 +7,12 @@ so there is exactly one place to change a value.
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from typing import Literal
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )
 
     # ── LLM ──────────────────────────────────────────────────────────────────
@@ -56,6 +57,10 @@ class Settings(BaseSettings):
         default=300, ge=30, alias="MEMORY_EXPIRY_SWEEP_INTERVAL_SECONDS"
     )
     session_db_path: str = Field(default="./raggy_memory.sqlite3", alias="SESSION_DB_PATH")
+    authoritative_db_backend: Literal["sqlite", "postgres"] = Field(
+        default="sqlite", alias="AUTHORITATIVE_DB_BACKEND"
+    )
+    postgres_database_url: str = Field(default="", alias="POSTGRES_DATABASE_URL")
     whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
 

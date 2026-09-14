@@ -107,7 +107,8 @@ async function loadBrowserMemories() {
   const params = new URLSearchParams({ status: memoryStatusFilter.value, limit: '100' });
   if (memoryScopeFilter.value) params.set('scope', memoryScopeFilter.value);
   const project = projectScopeInput.value.trim();
-  if (project) params.set('project_scope', project);
+  if (currentProjectId) params.set('project_id', currentProjectId);
+  else if (project) params.set('project_scope', project);
   memoryBrowserList.innerHTML = '<p class="memory-browser-empty">Loading…</p>';
   try {
     const res = await fetch(`${API}/api/memories?${params}`);
@@ -531,7 +532,7 @@ async function sendMessage() {
     cursor.remove();
     renderSources(botBubble, sourceMetadata);
     renderMemories(botBubble, memoryMetadata);
-    scheduleConflictCheck(botBubble, projectScopeInput.value.trim() || null);
+    scheduleConflictCheck(botBubble, currentProjectId, projectScopeInput.value.trim() || null);
     scrollToBottom();
 
   } catch (err) {
@@ -543,22 +544,24 @@ async function sendMessage() {
   }
 }
 
-function scheduleConflictCheck(botBubble, projectScope) {
+function scheduleConflictCheck(botBubble, projectId, projectScope) {
   // Extraction runs after the streamed reply, so retry briefly rather than
   // making the user send another message or open a terminal.
   [0, 1500, 4000, 8000].forEach(delay => {
-    setTimeout(() => loadOpenConflicts(botBubble, projectScope), delay);
+    setTimeout(() => loadOpenConflicts(botBubble, projectId, projectScope), delay);
   });
 }
 
-async function loadOpenConflicts(botBubble, projectScope) {
+async function loadOpenConflicts(botBubble, projectId, projectScope) {
   try {
-    const res = await fetch(`${API}/api/memories/conflicts`);
+    const params = new URLSearchParams();
+    if (projectId) params.set('project_id', projectId);
+    else if (projectScope) params.set('project_scope', projectScope);
+    const res = await fetch(`${API}/api/memories/conflicts?${params}`);
     if (!res.ok) return;
     const data = await res.json();
     (data.conflicts || [])
       .filter(conflict => !shownConflictIds.has(conflict.conflict_id))
-      .filter(conflict => conflict.project_scope === projectScope)
       .forEach(conflict => {
         shownConflictIds.add(conflict.conflict_id);
         renderConflictReview(botBubble, conflict);

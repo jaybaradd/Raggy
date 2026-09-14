@@ -134,6 +134,7 @@ class MemoryListResponse(BaseModel):
 class MemoryPromotionRequest(BaseModel):
     scope: Literal["user", "project"]
     project_scope: str | None = Field(default=None, max_length=200)
+    project_id: str | None = None
 
 
 class MemoryEditRequest(BaseModel):

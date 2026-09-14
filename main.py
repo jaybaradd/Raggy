@@ -27,7 +27,12 @@ from fastapi.staticfiles import StaticFiles
 from api.routers import documents, memories, messages, projects, sessions
 from api.schemas import HealthResponse
 from core.memory.expiry import expiry_sweep_loop, run_expiry_sweep
+from core.memory.projections import sync_pending_projections
 from core.storage.qdrant_store import qdrant_store
+from db.repository_factory import repositories
+
+memory_store = repositories.memories
+session_store = repositories.sessions
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -40,6 +45,17 @@ logger = logging.getLogger(__name__)
 # ── Application ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    result = memory_store.backfill_project_ids(session_store.project_name_mapping())
+    if result["updated"] or result["unmatched"]:
+        logger.info("Project memory backfill: %s", result)
+    # Bounded repair closes the normal migration/write path without making a
+    # full rebuild part of application startup.
+    try:
+        projection_result = await asyncio.to_thread(sync_pending_projections, store=memory_store, limit=100)
+        if projection_result["completed"] or projection_result["failed"]:
+            logger.info("Startup projection sync: %s", projection_result)
+    except Exception:
+        logger.exception("Startup projection sync failed")
     try:
         await run_expiry_sweep()
     except Exception:

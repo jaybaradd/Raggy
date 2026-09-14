@@ -17,7 +17,9 @@ from api.schemas import (
     SessionResponse,
     UpdateSessionRequest,
 )
-from db.session_store import session_store
+from db.repository_factory import repositories
+
+session_store = repositories.sessions
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 

@@ -18,6 +18,7 @@ from core.ingestion.parser import ParsedChunk, SourceLocator
 class AssetRecord(BaseModel):
     asset_id: str
     owner_id: str | None = None
+    project_id: str | None = None
     project_scope: str | None = None
     filename: str
     media_type: str

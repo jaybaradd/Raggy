@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 from api.schemas import CreateProjectRequest, ProjectListResponse, ProjectResponse
-from db.session_store import session_store
+from db.repository_factory import repositories
+
+session_store = repositories.sessions
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 

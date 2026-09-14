@@ -13,6 +13,7 @@ from pathlib import Path
 from threading import Lock
 
 from config import settings
+from db.migrations import Migration, MigrationRunner
 from core.ingestion.models import AssetRecord, EvidenceSegment
 
 
@@ -37,6 +38,7 @@ class EvidenceStore:
                 CREATE TABLE IF NOT EXISTS assets (
                     asset_id TEXT PRIMARY KEY,
                     owner_id TEXT,
+                    project_id TEXT,
                     project_scope TEXT,
                     filename TEXT NOT NULL,
                     media_type TEXT NOT NULL,
@@ -68,15 +70,22 @@ class EvidenceStore:
             }
             if "source_name" not in columns:
                 connection.execute("ALTER TABLE evidence_segments ADD COLUMN source_name TEXT")
+            asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
+            if "project_id" not in asset_columns:
+                connection.execute("ALTER TABLE assets ADD COLUMN project_id TEXT")
+            MigrationRunner("evidence").apply(connection, [
+                Migration(1, "legacy_evidence_schema_baseline", lambda _: None),
+                Migration(2, "asset_project_id", lambda _: None),
+            ])
 
     def upsert_asset(self, asset: AssetRecord) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO assets (
-                    asset_id, owner_id, project_scope, filename, media_type,
+                    asset_id, owner_id, project_id, project_scope, filename, media_type,
                     raw_file_uri, content_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asset_id) DO UPDATE SET
                     filename=excluded.filename,
                     media_type=excluded.media_type,
@@ -85,6 +94,7 @@ class EvidenceStore:
                 (
                     asset.asset_id,
                     asset.owner_id,
+                    asset.project_id,
                     asset.project_scope,
                     asset.filename,
                     asset.media_type,

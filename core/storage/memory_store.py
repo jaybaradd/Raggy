@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import Lock
 
 from config import settings
+from db.migrations import Migration, MigrationRunner
 from core.memory.models import (
     EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, MemoryScope, MemoryStatus,
     PreferenceMemory, SolutionMemory,
@@ -141,6 +142,11 @@ class MemoryStore:
                     (event_identity_key(record), json.dumps(record.payload.model_dump(mode="json"), sort_keys=True),
                      record.memory_id),
                 )
+            MigrationRunner("memories").apply(connection, [
+                Migration(1, "legacy_memory_schema_baseline", lambda _: None),
+                Migration(2, "event_identity_and_conflicts", lambda _: None),
+                Migration(3, "project_id_propagation", lambda _: None),
+            ])
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
                             event_type: str, message_id: str | None = None,
                             prompt_label: str | None = None, rank: int | None = None,
@@ -490,6 +496,32 @@ class MemoryStore:
                 [*params, limit],
             ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def backfill_project_ids(self, projects: dict[tuple[str, str], dict]) -> dict[str, int]:
+        """Attach IDs only when a legacy owner/name match is unambiguous.
+
+        Project creation is deliberately forbidden here: the session repository
+        is authoritative for project entities.
+        """
+        updated = unmatched = 0
+        now = datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("""SELECT memory_id, owner_id, project_scope FROM memory_records
+                WHERE scope = 'project' AND project_id IS NULL AND project_scope IS NOT NULL""").fetchall()
+            for row in rows:
+                normalized = " ".join(row["project_scope"].split()).casefold()
+                project = projects.get((row["owner_id"], normalized))
+                if project is None:
+                    unmatched += 1
+                    continue
+                connection.execute("UPDATE memory_records SET project_id = ?, updated_at = ? WHERE memory_id = ?",
+                                   (project["project_id"], now.isoformat(), row["memory_id"]))
+                self._audit_locked(connection, row["memory_id"], "project_id_backfilled", "system",
+                                   {"project_id": project["project_id"], "project_scope": row["project_scope"]}, now)
+                self._enqueue_projection_locked(connection, row["memory_id"], "qdrant", now.isoformat())
+                self._enqueue_projection_locked(connection, row["memory_id"], "graph", now.isoformat())
+                updated += 1
+        return {"updated": updated, "unmatched": unmatched}
 
     def list_audit_events(self, memory_id: str, *, owner_id: str, limit: int = 100) -> list[dict]:
         if self.get_owned(memory_id, owner_id=owner_id) is None:

@@ -31,10 +31,11 @@ from api.schemas import SendMessageRequest
 from core.llm.gemini import gemini_provider
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
-from core.storage.memory_store import memory_store
+from db.repository_factory import repositories
 from core.retrieval.engine import RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve
 from core.retrieval.memory import retrieve_memories
-from db.session_store import session_store
+memory_store = repositories.memories
+session_store = repositories.sessions
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])

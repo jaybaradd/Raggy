@@ -2,6 +2,38 @@
 
 ---
 
+### ✅ [2026-09-14] Optional Postgres development foundation
+
+- Added an opt-in Docker Compose Postgres 17 service with a persistent volume and health check, plus local Postgres connection configuration and the optional Psycopg driver dependency.
+- Added transactional Postgres logical migrations for sessions/messages and projects/memberships, mirroring the first authoritative SQLite schema versions without enabling Postgres as the live application backend.
+- SQLite remains the supported default while the remaining Postgres repositories are implemented and contract-tested.
+
+### ✅ [2026-09-14] Repository contracts and backend-selection seam
+
+- Added backend-neutral contracts for session/project, memory, evidence, and graph repositories plus a single repository container/factory.
+- API routers and application startup now depend on the container rather than importing concrete SQLite stores directly.
+- Added explicit SQLite/Postgres configuration. SQLite remains the default; a Postgres selection requires a URL and fails clearly until its repositories are implemented.
+- Added factory safety coverage for default selection and Postgres misconfiguration.
+
+### ✅ [2026-09-14] Versioned SQLite migration foundation
+
+- Added a shared transactional migration runner and per-component `schema_migrations` ledger for session/project, memory, graph, and evidence repositories.
+- Existing self-healing schemas are recorded as explicit compatibility baselines, avoiding a destructive rewrite of deployed SQLite files; future changes now have ordered migration versions.
+- Added migration-status operations tooling and deterministic coverage for ordering, idempotency, and rollback on failure.
+
+### ✅ [2026-09-14] Projection-sync reliability patch
+
+- Startup now performs one bounded synchronization of existing pending graph/Qdrant projection jobs after authoritative project-memory backfill.
+- Added `scripts/sync_pending_projections.py` for safe manual recovery; it processes existing jobs only and can explicitly requeue failed jobs. Full rebuild remains a separate deliberate script.
+
+### ✅ [2026-09-14] Project-ID propagation and legacy-memory migration
+
+- Added an owner-scoped, idempotent memory backfill that maps legacy project names only through the canonical session-project mapping, audits each change, and queues projection refreshes. Unmatched records remain safely name-scoped.
+- Made new event identity/comparison, memory retrieval, Qdrant payloads, graph records, memory APIs, browser filters, and conflict polling project-ID-aware, with legacy name fallback during transition.
+- Project-ID/name API inputs are validated against membership and rejected if mismatched. Graph identity now uses project IDs, preventing same-name scopes from colliding after project naming evolves.
+- Added nullable project ownership metadata to evidence assets without guessing historical asset assignment.
+- Added deterministic tests for authoritative backfill audit behavior and graph project-ID projections.
+
 ### ✅ [2026-09-14] Normalized project membership foundation
 
 - Added durable `projects` and `project_memberships` tables, with stable project IDs, normalized per-owner names, and owner roles ready for later multi-user authorization.

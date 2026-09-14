@@ -17,7 +17,7 @@ def event_identity_key(record: MemoryRecord) -> str:
         record.owner_id,
         record.scope,
         record.session_id if record.scope == "session" else "",
-        record.project_scope or "",
+        record.project_id or record.project_scope or "",
         canonical_event_type(payload.event_type),
         "|".join(sorted(_identity_entities(payload.entities))),
         _normalise(payload.locations[0]) if payload.locations else "",
@@ -30,8 +30,8 @@ def events_are_comparable(existing: MemoryRecord, incoming: MemoryRecord) -> boo
     """Match comparable events by scope, canonical type, and stable ID overlap."""
     if not isinstance(existing.payload, EventMemory) or not isinstance(incoming.payload, EventMemory):
         return False
-    if (existing.owner_id, existing.scope, existing.project_scope) != (
-        incoming.owner_id, incoming.scope, incoming.project_scope,
+    if (existing.owner_id, existing.scope, existing.project_id or existing.project_scope) != (
+        incoming.owner_id, incoming.scope, incoming.project_id or incoming.project_scope,
     ):
         return False
     if existing.scope == "session" and existing.session_id != incoming.session_id:
@@ -48,7 +48,7 @@ def event_comparison_key(record: MemoryRecord) -> tuple[str, ...] | None:
     if not entities:
         return None
     return (
-        record.owner_id, record.scope, record.session_id if record.scope == "session" else "", record.project_scope or "",
+        record.owner_id, record.scope, record.session_id if record.scope == "session" else "", record.project_id or record.project_scope or "",
         canonical_event_type(record.payload.event_type), *entities,
     )
 

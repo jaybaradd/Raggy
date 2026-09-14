@@ -14,6 +14,7 @@ from threading import Lock
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from config import settings
+from db.migrations import Migration, MigrationRunner
 from core.memory.models import MemoryRecord
 from core.memory.relations import normalize_label, normalize_predicate, relation_family
 
@@ -37,7 +38,7 @@ class GraphStore:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS graph_nodes (
                     node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, scope TEXT NOT NULL,
-                    session_id TEXT, project_scope TEXT, node_type TEXT NOT NULL,
+                    session_id TEXT, project_id TEXT, project_scope TEXT, node_type TEXT NOT NULL,
                     canonical_label TEXT NOT NULL, normalized_label TEXT NOT NULL,
                     attributes_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
@@ -45,7 +46,7 @@ class GraphStore:
                     ON graph_nodes(owner_id, scope, session_id, project_scope, normalized_label);
                 CREATE TABLE IF NOT EXISTS graph_aliases (
                     alias_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-                    scope TEXT NOT NULL, session_id TEXT, project_scope TEXT,
+                    scope TEXT NOT NULL, session_id TEXT, project_id TEXT, project_scope TEXT,
                     alias TEXT NOT NULL, normalized_alias TEXT NOT NULL,
                     created_at TEXT NOT NULL, UNIQUE(node_id, normalized_alias),
                     FOREIGN KEY(node_id) REFERENCES graph_nodes(node_id)
@@ -54,7 +55,7 @@ class GraphStore:
                     ON graph_aliases(owner_id, scope, session_id, project_scope, normalized_alias);
                 CREATE TABLE IF NOT EXISTS graph_edges (
                     edge_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, scope TEXT NOT NULL,
-                    session_id TEXT, project_scope TEXT, subject_node_id TEXT NOT NULL,
+                    session_id TEXT, project_id TEXT, project_scope TEXT, subject_node_id TEXT NOT NULL,
                     predicate TEXT NOT NULL, relation_family TEXT NOT NULL,
                     object_node_id TEXT NOT NULL, qualifiers_json TEXT NOT NULL,
                     memory_id TEXT NOT NULL UNIQUE, source_turn_id TEXT,
@@ -70,6 +71,14 @@ class GraphStore:
                 CREATE INDEX IF NOT EXISTS idx_graph_edges_object
                     ON graph_edges(owner_id, scope, session_id, project_scope, object_node_id, status);
             """)
+            for table in ("graph_nodes", "graph_aliases", "graph_edges"):
+                columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                if "project_id" not in columns:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN project_id TEXT")
+            MigrationRunner("graph").apply(connection, [
+                Migration(1, "legacy_graph_schema_baseline", lambda _: None),
+                Migration(2, "project_id_propagation", lambda _: None),
+            ])
 
     def sync_memory(self, record: MemoryRecord) -> None:
         """Project one record. Inactive records deactivate their derived edge."""
@@ -132,7 +141,7 @@ class GraphStore:
             )
 
     def list_edges(self, *, owner_id: str, scope: str | None = None,
-                   project_scope: str | None = None, status: str = "active") -> list[dict]:
+                   project_id: str | None = None, project_scope: str | None = None, status: str = "active") -> list[dict]:
         clauses = ["owner_id = ?", "status = ?"]
         params: list[object] = [owner_id, status]
         if scope is not None:
@@ -141,6 +150,9 @@ class GraphStore:
         if project_scope is not None:
             clauses.append("project_scope = ?")
             params.append(project_scope)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM graph_edges WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC", params
@@ -148,7 +160,7 @@ class GraphStore:
         return [dict(row) for row in rows]
 
     def list_nodes(self, *, owner_id: str, scope: str | None = None,
-                   project_scope: str | None = None) -> list[dict]:
+                   project_id: str | None = None, project_scope: str | None = None) -> list[dict]:
         clauses = ["owner_id = ?"]
         params: list[object] = [owner_id]
         if scope is not None:
@@ -157,6 +169,9 @@ class GraphStore:
         if project_scope is not None:
             clauses.append("project_scope = ?")
             params.append(project_scope)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM graph_nodes WHERE {' AND '.join(clauses)} ORDER BY canonical_label", params
@@ -173,14 +188,14 @@ class GraphStore:
         edge_id = str(uuid5(NAMESPACE_URL, f"raggy:graph-edge:{record.memory_id}"))
         connection.execute("""
             INSERT INTO graph_edges (
-                edge_id, owner_id, scope, session_id, project_scope, subject_node_id,
+                edge_id, owner_id, scope, session_id, project_id, project_scope, subject_node_id,
                 predicate, relation_family, object_node_id, qualifiers_json, memory_id,
                 source_turn_id, evidence_refs_json, provenance_kind, confidence, status,
                 valid_from, valid_to, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
             ON CONFLICT(memory_id) DO UPDATE SET
                 owner_id=excluded.owner_id, scope=excluded.scope, session_id=excluded.session_id,
-                project_scope=excluded.project_scope, subject_node_id=excluded.subject_node_id,
+                project_id=excluded.project_id, project_scope=excluded.project_scope, subject_node_id=excluded.subject_node_id,
                 predicate=excluded.predicate, relation_family=excluded.relation_family,
                 object_node_id=excluded.object_node_id, qualifiers_json=excluded.qualifiers_json,
                 source_turn_id=excluded.source_turn_id, evidence_refs_json=excluded.evidence_refs_json,
@@ -188,7 +203,7 @@ class GraphStore:
                 status='active', valid_from=excluded.valid_from, valid_to=excluded.valid_to,
                 updated_at=excluded.updated_at
         """, (
-            edge_id, record.owner_id, record.scope, record.session_id, record.project_scope,
+            edge_id, record.owner_id, record.scope, record.session_id, record.project_id, record.project_scope,
             subject_node, normalize_predicate(predicate), relation_family(predicate), object_node,
             json.dumps(qualifiers, sort_keys=True), record.memory_id, record.source_turn_id,
             json.dumps(record.evidence_refs), provenance_kind, record.confidence,
@@ -201,8 +216,8 @@ class GraphStore:
                       attributes: dict | None = None) -> str:
         normalized = normalize_label(label)
         clauses = ["owner_id = ?", "scope = ?", "COALESCE(session_id, '') = COALESCE(?, '')",
-                   "COALESCE(project_scope, '') = COALESCE(?, '')"]
-        params: list[object] = [record.owner_id, record.scope, record.session_id, record.project_scope]
+                   "COALESCE(project_id, '') = COALESCE(?, '')"]
+        params: list[object] = [record.owner_id, record.scope, record.session_id, record.project_id]
         row = connection.execute(
             f"SELECT node_id FROM graph_nodes WHERE {' AND '.join(clauses)} AND normalized_label = ?",
             [*params, normalized],
@@ -211,7 +226,7 @@ class GraphStore:
             row = connection.execute(
                 """SELECT node_id FROM graph_aliases WHERE owner_id = ? AND scope = ?
                    AND COALESCE(session_id, '') = COALESCE(?, '')
-                   AND COALESCE(project_scope, '') = COALESCE(?, '') AND normalized_alias = ?""",
+                   AND COALESCE(project_id, '') = COALESCE(?, '') AND normalized_alias = ?""",
                 [*params, normalized],
             ).fetchone()
         now = _now()
@@ -219,10 +234,10 @@ class GraphStore:
             node_id = str(uuid4())
             connection.execute(
                 """INSERT INTO graph_nodes (
-                    node_id, owner_id, scope, session_id, project_scope, node_type,
+                    node_id, owner_id, scope, session_id, project_id, project_scope, node_type,
                     canonical_label, normalized_label, attributes_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (node_id, record.owner_id, record.scope, record.session_id, record.project_scope,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (node_id, record.owner_id, record.scope, record.session_id, record.project_id, record.project_scope,
                  node_type, label, normalized, json.dumps(attributes or {}, sort_keys=True), now, now),
             )
         else:
@@ -233,11 +248,11 @@ class GraphStore:
             if normalized_alias:
                 connection.execute(
                     """INSERT OR IGNORE INTO graph_aliases (
-                        alias_id, node_id, owner_id, scope, session_id, project_scope,
+                        alias_id, node_id, owner_id, scope, session_id, project_id, project_scope,
                         alias, normalized_alias, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (str(uuid4()), node_id, record.owner_id, record.scope, record.session_id,
-                     record.project_scope, alias, normalized_alias, now),
+                     record.project_id, record.project_scope, alias, normalized_alias, now),
                 )
         return node_id
 

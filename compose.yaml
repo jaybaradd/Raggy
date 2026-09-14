@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: raggy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: raggy
+    ports:
+      - "5432:5432"
+    volumes:
+      - raggy-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raggy -d raggy"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  raggy-postgres-data:

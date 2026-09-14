@@ -16,6 +16,7 @@ from threading import Lock
 from typing import TypedDict
 
 from config import settings
+from db.migrations import Migration, MigrationRunner
 
 
 class Message(TypedDict):
@@ -104,6 +105,10 @@ class SessionStore:
                 connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_project_id ON sessions(owner_id, project_id, updated_at DESC)")
             self._backfill_projects(connection)
+            MigrationRunner("sessions").apply(connection, [
+                Migration(1, "legacy_session_schema_baseline", lambda _: None),
+                Migration(2, "projects_and_project_memberships", lambda _: None),
+            ])
 
     @staticmethod
     def _normalise_project_name(name: str) -> str:
@@ -151,6 +156,12 @@ class SessionStore:
                 ON project_memberships.project_id = projects.project_id
                 WHERE projects.project_id = ? AND project_memberships.owner_id = ? AND projects.archived_at IS NULL""", (project_id, owner_id)).fetchone()
         return dict(row) if row else None
+
+    def project_name_mapping(self) -> dict[tuple[str, str], dict]:
+        """Return the canonical owner/name -> project mapping for migrations."""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM projects WHERE archived_at IS NULL").fetchall()
+        return {(row["owner_id"], row["normalized_name"]): dict(row) for row in rows}
 
     def create_session(self, title: str = "New chat", project_scope: str | None = None, project_id: str | None = None,
                        owner_id: str = "default") -> Session:

@@ -23,10 +23,11 @@ from core.embeddings import embedder
 from core.ingestion.chunker import chunk_parsed_chunks
 from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import compute_doc_id, get_parser
-from core.storage.evidence_store import evidence_store
+from db.repository_factory import repositories
 from core.storage.qdrant_store import qdrant_store
 
 logger = logging.getLogger(__name__)
+evidence_store = repositories.evidence
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _doc_registry: dict[str, DocumentStatusResponse] = {}
