@@ -92,6 +92,7 @@ async def send_message(
     memory_result = retrieve_memories(
         body.content,
         session_id=session_id,
+        project_id=session.get("project_id"),
         project_scope=session.get("project_scope"),
     )
     if memory_result.context:
@@ -178,6 +179,7 @@ async def send_message(
     return StreamingResponse(
         _stream_response(
             session_id=session_id,
+            project_id=session.get("project_id"),
             project_scope=session.get("project_scope"),
             messages=messages,
             sources=sources,
@@ -195,6 +197,7 @@ async def send_message(
 
 async def _stream_response(
     session_id: str,
+    project_id: str | None,
     project_scope: str | None,
     messages: list[dict],
     sources: list[dict],
@@ -237,6 +240,7 @@ async def _stream_response(
         extractor=MemoryExtractor(gemini_provider),
         source_turn_id=assistant_turn_id,
         session_id=session_id,
+        project_id=project_id,
         project_scope=project_scope,
         owner_id="default",
         user_content=user_content,

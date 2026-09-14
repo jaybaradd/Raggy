@@ -273,7 +273,7 @@ class QdrantStore:
             payload={
                 "memory_id": record.memory_id, "memory_text": text, "kind": record.kind,
                 "owner_id": record.owner_id, "scope": record.scope,
-                "session_id": record.session_id, "project_scope": record.project_scope,
+                "session_id": record.session_id, "project_id": record.project_id, "project_scope": record.project_scope,
                 "status": record.status, "confidence": record.confidence,
                 "user_confirmed": record.user_confirmed, "source_turn_id": record.source_turn_id,
                 "evidence_refs": record.evidence_refs, "valid_from": record.valid_from.isoformat(),
@@ -297,13 +297,16 @@ class QdrantStore:
             logger.debug("Memory %s was not present in Qdrant projection", memory_id)
 
     def search_memories(self, *, query_vector: list[float], query_text: str, owner_id: str,
-                        session_id: str, project_scope: str | None = None,
+                        session_id: str, project_id: str | None = None, project_scope: str | None = None,
                         top_k: int = 5) -> list[dict]:
         """Search only active memories in scopes applicable to the current session."""
         store = self._memory_store()
         scope_filters = [("session", session_id), ("user", owner_id)]
+        if project_id:
+            scope_filters.append(("project_id", project_id))
+        # Compatibility query for projections written before project IDs.
         if project_scope:
-            scope_filters.append(("project", project_scope))
+            scope_filters.append(("project_scope", project_scope))
         hits: list[dict] = []
         for scope, scope_value in scope_filters:
             must = [
@@ -314,8 +317,8 @@ class QdrantStore:
             ]
             if scope == "session":
                 must.append(qmodels.FieldCondition(key="session_id", match=qmodels.MatchValue(value=scope_value)))
-            elif scope == "project":
-                must.append(qmodels.FieldCondition(key="project_scope", match=qmodels.MatchValue(value=scope_value)))
+            elif scope in {"project_id", "project_scope"}:
+                must.append(qmodels.FieldCondition(key=scope, match=qmodels.MatchValue(value=scope_value)))
             query_filter = qmodels.Filter(must=must)
             hits.extend(store.search(query_vector, query_text, top_k * 2, query_filter=query_filter))
         unique = {hit["memory_id"]: hit for hit in hits}

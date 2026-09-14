@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api.routers import documents, memories, messages, sessions
+from api.routers import documents, memories, messages, projects, sessions
 from api.schemas import HealthResponse
 from core.memory.expiry import expiry_sweep_loop, run_expiry_sweep
 from core.storage.qdrant_store import qdrant_store
@@ -73,6 +73,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(sessions.router, prefix="/api")
+app.include_router(projects.router, prefix="/api")
 app.include_router(messages.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(memories.router, prefix="/api")

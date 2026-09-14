@@ -83,6 +83,7 @@ class MemoryRecord(BaseModel):
     owner_id: str = "default"
     scope: MemoryScope = "session"
     session_id: str | None = None
+    project_id: str | None = None
     project_scope: str | None = None
     kind: MemoryKind
     status: MemoryStatus = "candidate"
@@ -109,6 +110,6 @@ class MemoryRecord(BaseModel):
             raise ValueError(f"kind '{self.kind}' requires {expected.__name__} payload")
         if self.scope == "session" and not self.session_id:
             raise ValueError("session-scoped memory requires session_id")
-        if self.scope == "project" and not self.project_scope:
-            raise ValueError("project-scoped memory requires project_scope")
+        if self.scope == "project" and not (self.project_id or self.project_scope):
+            raise ValueError("project-scoped memory requires project_id or project_scope")
         return self

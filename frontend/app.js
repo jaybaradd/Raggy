@@ -4,6 +4,7 @@ const API = '';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let currentSessionId = null;
+let currentProjectId = null;
 let isStreaming = false;
 let pendingFile = null;       // File object waiting to be uploaded on send
 let detectedYtUrl = null;     // YouTube URL detected in textarea
@@ -335,7 +336,7 @@ function renderSessionList(sessions) {
         el.className = 'session-item' + (session.session_id === currentSessionId ? ' active' : '');
         el.textContent = session.title;
         el.dataset.id = session.session_id;
-        el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope));
+        el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope, session.project_id));
         sessionList.appendChild(el);
       });
     });
@@ -349,10 +350,12 @@ async function createNewSession() {
       body: JSON.stringify({
         title: 'New chat',
         project_scope: projectScopeInput.value.trim() || null,
+        project_id: currentProjectId,
       }),
     });
     const session = await res.json();
     currentSessionId = session.session_id;
+    currentProjectId = session.project_id || null;
     chatTitle.textContent = session.project_scope
       ? `${session.title} · ${session.project_scope}`
       : session.title;
@@ -363,8 +366,9 @@ async function createNewSession() {
   }
 }
 
-async function switchSession(sessionId, title, projectScope) {
+async function switchSession(sessionId, title, projectScope, projectId = null) {
   currentSessionId = sessionId;
+  currentProjectId = projectId;
   projectScopeInput.value = projectScope || '';
   chatTitle.textContent = projectScope ? `${title} · ${projectScope}` : title;
   clearThread();
@@ -399,15 +403,18 @@ async function loadSessionMessages(sessionId) {
 async function saveCurrentSessionProject() {
   if (!currentSessionId) return;
   const projectScope = projectScopeInput.value.trim() || null;
+  // Typing a new name intentionally lets the backend resolve-or-create it.
+  currentProjectId = null;
   try {
     const res = await fetch(`${API}/api/sessions/${currentSessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_scope: projectScope }),
+      body: JSON.stringify({ project_scope: projectScope, project_id: currentProjectId }),
     });
     if (!res.ok) throw new Error('Could not update project');
     const session = await res.json();
     projectScopeInput.value = session.project_scope || '';
+    currentProjectId = session.project_id || null;
     chatTitle.textContent = session.project_scope
       ? `${session.title} · ${session.project_scope}`
       : session.title;

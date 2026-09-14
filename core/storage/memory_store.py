@@ -45,7 +45,7 @@ class MemoryStore:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS memory_records (
                     memory_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, scope TEXT NOT NULL,
-                    session_id TEXT, project_scope TEXT, kind TEXT NOT NULL, status TEXT NOT NULL,
+                    session_id TEXT, project_id TEXT, project_scope TEXT, kind TEXT NOT NULL, status TEXT NOT NULL,
                     confidence REAL NOT NULL, user_confirmed INTEGER NOT NULL,
                     evidence_refs_json TEXT NOT NULL, source_turn_id TEXT,
                     extraction_model TEXT NOT NULL, extraction_version TEXT NOT NULL,
@@ -128,6 +128,8 @@ class MemoryStore:
                     ON memory_projection_jobs(status, updated_at);
             """)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_records)")}
+            if "project_id" not in columns:
+                connection.execute("ALTER TABLE memory_records ADD COLUMN project_id TEXT")
             if "identity_key" not in columns:
                 connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
             connection.execute("""CREATE INDEX IF NOT EXISTS idx_memory_event_identity
@@ -199,14 +201,14 @@ class MemoryStore:
                        actor_id: str | None, details: dict | None, now: datetime) -> None:
         connection.execute("""
                 INSERT INTO memory_records (
-                    memory_id, owner_id, scope, session_id, project_scope, kind, status,
+                    memory_id, owner_id, scope, session_id, project_id, project_scope, kind, status,
                     confidence, user_confirmed, evidence_refs_json, source_turn_id,
                     extraction_model, extraction_version, identity_key, valid_from, valid_to, superseded_by,
                     payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     owner_id=excluded.owner_id, scope=excluded.scope,
-                    session_id=excluded.session_id, project_scope=excluded.project_scope,
+                    session_id=excluded.session_id, project_id=excluded.project_id, project_scope=excluded.project_scope,
                     status=excluded.status, confidence=excluded.confidence,
                     user_confirmed=excluded.user_confirmed, evidence_refs_json=excluded.evidence_refs_json,
                     identity_key=excluded.identity_key, valid_to=excluded.valid_to, superseded_by=excluded.superseded_by,
@@ -472,13 +474,13 @@ class MemoryStore:
         return record if record and record.owner_id == owner_id else None
 
     def list(self, *, owner_id: str, scope: MemoryScope | None = None,
-             session_id: str | None = None, project_scope: str | None = None,
+             session_id: str | None = None, project_id: str | None = None, project_scope: str | None = None,
              status: MemoryStatus | None = "active", kind: str | None = None,
              limit: int = 100) -> list[MemoryRecord]:
         clauses = ["owner_id = ?"]
         params: list[object] = [owner_id]
         for field, value in (("scope", scope), ("session_id", session_id),
-                             ("project_scope", project_scope), ("status", status), ("kind", kind)):
+                             ("project_id", project_id), ("project_scope", project_scope), ("status", status), ("kind", kind)):
             if value is not None:
                 clauses.append(f"{field} = ?")
                 params.append(value)
@@ -606,7 +608,7 @@ class MemoryStore:
 
     @staticmethod
     def _params(record: MemoryRecord) -> tuple[object, ...]:
-        return (record.memory_id, record.owner_id, record.scope, record.session_id, record.project_scope,
+        return (record.memory_id, record.owner_id, record.scope, record.session_id, record.project_id, record.project_scope,
                 record.kind, record.status, record.confidence, int(record.user_confirmed),
                 json.dumps(record.evidence_refs), record.source_turn_id, record.extraction_model,
                 record.extraction_version, record.identity_key, record.valid_from.isoformat(),
@@ -618,7 +620,7 @@ class MemoryStore:
     def _from_row(row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
             memory_id=row["memory_id"], owner_id=row["owner_id"], scope=row["scope"],
-            session_id=row["session_id"], project_scope=row["project_scope"], kind=row["kind"],
+            session_id=row["session_id"], project_id=row["project_id"], project_scope=row["project_scope"], kind=row["kind"],
             status=row["status"], confidence=row["confidence"], user_confirmed=bool(row["user_confirmed"]),
             evidence_refs=json.loads(row["evidence_refs_json"]), source_turn_id=row["source_turn_id"],
             extraction_model=row["extraction_model"], extraction_version=row["extraction_version"],

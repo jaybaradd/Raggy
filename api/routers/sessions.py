@@ -24,11 +24,12 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionResponse, status_code=201)
 def create_session(body: CreateSessionRequest) -> SessionResponse:
-    session = session_store.create_session(title=body.title, project_scope=body.project_scope)
+    session = session_store.create_session(title=body.title, project_scope=body.project_scope, project_id=body.project_id)
     return SessionResponse(
         session_id=session["session_id"],
         title=session["title"],
         project_scope=session["project_scope"],
+        project_id=session["project_id"], project_name=session["project_name"],
         created_at=session["created_at"],
     )
 
@@ -42,6 +43,7 @@ def list_sessions() -> SessionListResponse:
                 session_id=s["session_id"],
                 title=s["title"],
                 project_scope=s["project_scope"],
+                project_id=s["project_id"], project_name=s["project_name"],
                 created_at=s["created_at"],
             )
             for s in sessions
@@ -58,6 +60,7 @@ def get_session(session_id: str) -> SessionResponse:
         session_id=session["session_id"],
         title=session["title"],
         project_scope=session["project_scope"],
+        project_id=session["project_id"], project_name=session["project_name"],
         created_at=session["created_at"],
     )
 
@@ -77,12 +80,13 @@ def update_session(session_id: str, body: UpdateSessionRequest) -> SessionRespon
     """Move an existing chat into a project, or remove it from one."""
     project_scope = body.project_scope.strip() if body.project_scope else None
     try:
-        session = session_store.update_project_scope(session_id, project_scope)
+        session = session_store.update_project_scope(session_id, project_scope, body.project_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found") from None
     return SessionResponse(
         session_id=session["session_id"],
         title=session["title"],
         project_scope=session["project_scope"],
+        project_id=session["project_id"], project_name=session["project_name"],
         created_at=session["created_at"],
     )

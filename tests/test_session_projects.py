@@ -56,6 +56,24 @@ class SessionProjectTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.store.get_messages(session["session_id"], owner_id="owner-b")
 
+    def test_legacy_named_sessions_backfill_to_one_stable_project_after_restart(self) -> None:
+        first = self.store.create_session(project_scope=" Imports ")
+        second = self.store.create_session(project_scope="imports")
+
+        restarted = SessionStore(self.db_path)
+        first_restored = restarted.get_session(first["session_id"])
+        second_restored = restarted.get_session(second["session_id"])
+
+        self.assertEqual(first_restored["project_id"], second_restored["project_id"])
+        self.assertEqual(len(restarted.list_projects()), 1)
+        self.assertEqual(restarted.list_projects()[0]["name"], "Imports")
+
+    def test_project_membership_is_owner_scoped(self) -> None:
+        project = self.store.create_project("Operations", owner_id="owner-a")
+        self.assertIsNone(self.store.get_project(project["project_id"], owner_id="owner-b"))
+        with self.assertRaises(KeyError):
+            self.store.create_session(project_id=project["project_id"], owner_id="owner-b")
+
 
 if __name__ == "__main__":
     unittest.main()

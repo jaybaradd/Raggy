@@ -17,21 +17,36 @@ from uuid import UUID
 class CreateSessionRequest(BaseModel):
     title: str = Field(default="New chat", max_length=200)
     project_scope: str | None = Field(default=None, max_length=200)
+    project_id: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
     project_scope: str | None = Field(default=None, max_length=200)
+    project_id: str | None = None
 
 
 class SessionResponse(BaseModel):
     session_id: str
     title: str
     project_scope: str | None = None
+    project_id: str | None = None
+    project_name: str | None = None
     created_at: str
 
 
 class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+class ProjectResponse(BaseModel):
+    project_id: str
+    name: str
+    created_at: str
+
+class ProjectListResponse(BaseModel):
+    projects: list[ProjectResponse]
 
 
 # ── Messages ──────────────────────────────────────────────────────────────────

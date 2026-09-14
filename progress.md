@@ -2,6 +2,14 @@
 
 ---
 
+### ✅ [2026-09-14] Normalized project membership foundation
+
+- Added durable `projects` and `project_memberships` tables, with stable project IDs, normalized per-owner names, and owner roles ready for later multi-user authorization.
+- Sessions now retain both a stable `project_id` and compatibility/display `project_scope`; legacy named sessions are idempotently backfilled on repository startup.
+- Added project list/create APIs and project-ID-aware session create/update responses while preserving existing name-based clients.
+- New extracted memories and Qdrant projections carry project IDs. Retrieval queries the stable ID plus the legacy display-name projection during transition, so older project memories remain discoverable.
+- Added migration, name-normalization, restart, and cross-owner membership-isolation tests.
+
 ### ✅ [2026-09-13] Durable attachment metadata in chat history
 
 - Replaced the loose chat-attachment dictionaries with a validated API contract: attachment ID, filename, MIME type, byte size, source mode, and optional document/evidence references.
