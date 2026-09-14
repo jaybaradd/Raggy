@@ -39,6 +39,8 @@ class EvidenceSegment(BaseModel):
     parent_evidence_id: str | None = None
     parser_backend: str
     parser_version: str = "1"
+    # Fields needed to recreate a retrieval payload without reparsing the source.
+    retrieval_metadata: dict[str, str | None] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -56,5 +58,6 @@ class EvidenceSegment(BaseModel):
             source_name=chunk.source_name,
             locator=chunk.source_locator,
             parser_backend=chunk.parser_backend,
+            retrieval_metadata={"context_prefix": chunk.context_prefix, "embedding_model": chunk.embedding_model},
             created_at=chunk.created_at,
         )

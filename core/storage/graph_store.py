@@ -21,7 +21,7 @@ from core.memory.relations import normalize_label, normalize_predicate, relation
 
 class GraphStore:
     def __init__(self, db_path: str | None = None) -> None:
-        self._path = Path(db_path or settings.memory_db_path)
+        self._path = Path(db_path or settings.graph_db_path)
         if self._path.parent != Path("."):
             self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()

@@ -161,6 +161,16 @@ Use typed payloads rather than one nullable schema:
 - Qdrant: semantic projections of evidence and active memory records.
 - Graphiti/FalkorDB: entity nodes and temporal relationships, rebuildable from authoritative records.
 
+### Fresh PostgreSQL cutover decision (2026-09-14)
+
+The current SQLite data is disposable development/test data, not production data. Raggy will therefore **start fresh in PostgreSQL** rather than perform a SQLite-to-Postgres data import.
+
+- Existing SQLite database files, uploaded files, and Qdrant data are retained untouched as an archive and rollback reference; they are not deleted or imported.
+- PostgreSQL schema migrations remain required and will initialize an empty authoritative database.
+- PostgreSQL becomes selectable only when the session, memory, and evidence repositories can be constructed together as one authority.
+- A fresh Qdrant collection will be used for Postgres-backed evidence and memory projections; the existing collection is retained unchanged.
+- The local graph projection starts empty and is rebuilt solely from new Postgres memory records. FalkorDB is introduced only after the Postgres cutover and operational checks succeed.
+
 ### Hybrid memory architecture decision
 
 Keep the memory system hybrid rather than selecting one storage mechanism for every workload:
@@ -209,8 +219,9 @@ Implementation order:
 2. Project active memory records into nodes and generic edges, including provenance and temporal qualifiers.
 3. Add a durable projection outbox, retries, status inspection, and rebuild support.
 4. Add contradiction candidate detection and review APIs.
-5. Add durable sessions/messages with the Postgres migration.
-6. Add graph/vector fused retrieval and multi-hop planning in Phase 3.
+5. Initialize a fresh Postgres authority, run Postgres-backed UI/restart checks, and rebuild fresh vector/graph projections.
+6. Add FalkorDB as a rebuildable graph projection and validate it against the local graph projection.
+7. Add graph/vector fused retrieval and multi-hop planning in Phase 3.
 
 ### Exit criteria
 

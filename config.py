@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     upload_dir: str = Field(default="./uploaded_files", alias="UPLOAD_DIR")
     metadata_db_path: str = Field(default="./raggy_metadata.sqlite3", alias="METADATA_DB_PATH")
     memory_db_path: str = Field(default="./raggy_memory.sqlite3", alias="MEMORY_DB_PATH")
+    graph_db_path: str = Field(default="./raggy_graph_projection.sqlite3", alias="GRAPH_DB_PATH")
     memory_expiry_sweep_interval_seconds: int = Field(
         default=300, ge=30, alias="MEMORY_EXPIRY_SWEEP_INTERVAL_SECONDS"
     )
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
         default="sqlite", alias="AUTHORITATIVE_DB_BACKEND"
     )
     postgres_database_url: str = Field(default="", alias="POSTGRES_DATABASE_URL")
+    postgres_schema: str | None = Field(default=None, alias="POSTGRES_SCHEMA")
     whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
 

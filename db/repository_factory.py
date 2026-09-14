@@ -19,7 +19,20 @@ def create_repositories(config: Settings = settings) -> Repositories:
     if config.authoritative_db_backend == "postgres":
         if not config.postgres_database_url:
             raise RuntimeError("POSTGRES_DATABASE_URL is required when AUTHORITATIVE_DB_BACKEND=postgres")
-        raise RuntimeError("Postgres repositories are not implemented yet; use sqlite for this release")
+        try:
+            from db.postgres_session_store import PostgresSessionRepository
+            from db.postgres_memory_store import PostgresMemoryRepository
+            from db.postgres_evidence_store import PostgresEvidenceRepository
+            from core.storage.graph_store import GraphStore
+            # Construct every authoritative repository before returning any of
+            # them: a failed constructor aborts startup and cannot fall back.
+            sessions = PostgresSessionRepository(config.postgres_database_url, schema=config.postgres_schema)
+            memories = PostgresMemoryRepository(config.postgres_database_url, schema=config.postgres_schema)
+            evidence = PostgresEvidenceRepository(config.postgres_database_url, schema=config.postgres_schema)
+            graph = GraphStore(config.graph_db_path)
+        except Exception as error:
+            raise RuntimeError("Postgres authoritative repository initialization failed") from error
+        return Repositories(sessions, memories, evidence, graph)
     if config.authoritative_db_backend != "sqlite":
         raise RuntimeError(f"Unsupported authoritative database backend: {config.authoritative_db_backend}")
     # Imports remain here so application callers do not bind to SQLite classes.

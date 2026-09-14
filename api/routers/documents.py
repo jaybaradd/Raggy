@@ -19,12 +19,11 @@ from fastapi.responses import FileResponse
 
 from api.schemas import DocumentStatusResponse, ParseDocumentResponse, UploadDocumentResponse, YouTubeIngestRequest
 from config import settings
-from core.embeddings import embedder
 from core.ingestion.chunker import chunk_parsed_chunks
 from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import compute_doc_id, get_parser
+from core.evidence.projections import sync_pending_evidence_projections
 from db.repository_factory import repositories
-from core.storage.qdrant_store import qdrant_store
 
 logger = logging.getLogger(__name__)
 evidence_store = repositories.evidence
@@ -53,6 +52,7 @@ async def _run_ingestion_job(
     doc_id: str,
     modality: str,
     filename: str,
+    run_id: str | None = None,
 ) -> None:
     """Run heavy parsing off the event loop and update the in-memory status."""
     try:
@@ -62,11 +62,15 @@ async def _run_ingestion_job(
         _doc_registry[doc_id] = DocumentStatusResponse(
             doc_id=doc_id, modality=modality, status="error", chunk_count=0, message=str(exc)
         )
+        if run_id:
+            evidence_store.complete_ingestion(run_id, chunk_count=0, error=str(exc))
         return
 
     _doc_registry[doc_id] = DocumentStatusResponse(
         doc_id=doc_id, modality=modality, status="done", chunk_count=chunk_count
     )
+    if run_id:
+        evidence_store.complete_ingestion(run_id, chunk_count=chunk_count)
 
 
 @router.post("", response_model=UploadDocumentResponse, status_code=202)
@@ -106,7 +110,8 @@ async def upload_document(file: UploadFile) -> UploadDocumentResponse:
         raw_file_uri=file_path.resolve().as_uri(),
         content_hash=doc_id,
     ))
-    asyncio.create_task(_run_ingestion_job(file_path, doc_id, modality, filename))
+    run = evidence_store.start_ingestion(doc_id, modality=modality)
+    asyncio.create_task(_run_ingestion_job(file_path, doc_id, modality, filename, run["run_id"]))
     return UploadDocumentResponse(
         doc_id=doc_id, filename=filename, modality=modality, status="processing",
         chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
@@ -175,7 +180,8 @@ async def ingest_youtube(body: YouTubeIngestRequest) -> UploadDocumentResponse:
     ))
 
     # Pass the complete URL as a string; YouTubeParser preserves it for yt-dlp.
-    asyncio.create_task(_run_ingestion_job(url, doc_id, "youtube", url))
+    run = evidence_store.start_ingestion(doc_id, modality="youtube")
+    asyncio.create_task(_run_ingestion_job(url, doc_id, "youtube", url, run["run_id"]))
     return UploadDocumentResponse(
         doc_id=doc_id, filename=url, modality="youtube", status="processing",
         chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
@@ -185,6 +191,10 @@ async def ingest_youtube(body: YouTubeIngestRequest) -> UploadDocumentResponse:
 @router.get("/{doc_id}/status", response_model=DocumentStatusResponse)
 def document_status(doc_id: str) -> DocumentStatusResponse:
     record = _doc_registry.get(doc_id)
+    if record is None:
+        stored = evidence_store.get_document_status(doc_id)
+        if stored is not None:
+            return DocumentStatusResponse(**stored)
     if record is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return record
@@ -216,10 +226,6 @@ def _ingest(file_path: Path | str, doc_id: str, modality: str, filename: str) ->
         logger.warning("No chunks produced for '%s'", filename)
         return 0
 
-    logger.info("Embedding %d chunks …", len(chunks))
-    texts = [c.content for c in chunks]
-    vectors = embedder.encode(texts)
-
     for chunk in chunks:
         chunk.embedding_model = settings.local_embed_model
         chunk.source_name = Path(filename).name if modality != "youtube" else filename
@@ -227,6 +233,8 @@ def _ingest(file_path: Path | str, doc_id: str, modality: str, filename: str) ->
     evidence_store.upsert_evidence([
         EvidenceSegment.from_chunk(chunk) for chunk in chunks
     ])
-    qdrant_store.upsert(chunks, vectors)
-    logger.info("Stored %d chunks for doc_id=%s", len(chunks), doc_id[:8])
+    projection_result = sync_pending_evidence_projections(store=evidence_store)
+    if projection_result["failed"]:
+        raise RuntimeError(f"Evidence projection failed for {projection_result['failed']} chunk(s)")
+    logger.info("Stored and projected %d chunks for doc_id=%s", len(chunks), doc_id[:8])
     return len(chunks)

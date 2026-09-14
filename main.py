@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routers import documents, memories, messages, projects, sessions
 from api.schemas import HealthResponse
+from core.evidence.projections import sync_pending_evidence_projections
 from core.memory.expiry import expiry_sweep_loop, run_expiry_sweep
 from core.memory.projections import sync_pending_projections
 from core.storage.qdrant_store import qdrant_store
@@ -33,6 +34,7 @@ from db.repository_factory import repositories
 
 memory_store = repositories.memories
 session_store = repositories.sessions
+evidence_store = repositories.evidence
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -56,6 +58,14 @@ async def lifespan(_: FastAPI):
             logger.info("Startup projection sync: %s", projection_result)
     except Exception:
         logger.exception("Startup projection sync failed")
+    try:
+        evidence_projection_result = await asyncio.to_thread(
+            sync_pending_evidence_projections, store=evidence_store, limit=100
+        )
+        if evidence_projection_result["completed"] or evidence_projection_result["failed"]:
+            logger.info("Startup evidence projection sync: %s", evidence_projection_result)
+    except Exception:
+        logger.exception("Startup evidence projection sync failed")
     try:
         await run_expiry_sweep()
     except Exception:

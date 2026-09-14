@@ -32,11 +32,10 @@ from config import settings
 from core.ingestion.parser import ParsedChunk
 from core.memory.models import MemoryRecord
 from core.memory.projection import memory_text
+from core.retrieval.memory_scope import applicable_memory_scopes
 
 if TYPE_CHECKING:
     pass
-
-from core.embeddings import embedder
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +78,14 @@ class QdrantStore:
         *,
         client: QdrantClient | None = None,
         bm25_encoder=None,
+        embedding_backend=None,
     ) -> None:
         self._collection = collection_name or settings.qdrant_collection
-        self._dim = embedder.dimension
+        if embedding_backend is None:
+            from core.embeddings import embedder as default_embedder
+            embedding_backend = default_embedder
+        self._embedder = embedding_backend
+        self._dim = self._embedder.dimension
         self._bm25 = bm25_encoder or _build_bm25_encoder()
 
         if client is not None:
@@ -152,6 +156,7 @@ class QdrantStore:
                 collection,
                 client=self._client,
                 bm25_encoder=self._bm25,
+                embedding_backend=self._embedder,
             )
             self._modality_stores = stores
         return stores[collection]
@@ -254,7 +259,12 @@ class QdrantStore:
     def _memory_store(self) -> "QdrantStore":
         store = getattr(self, "_memory_collection_store", None)
         if store is None:
-            store = QdrantStore(settings.memory_collection, client=self._client, bm25_encoder=self._bm25)
+            store = QdrantStore(
+                settings.memory_collection,
+                client=self._client,
+                bm25_encoder=self._bm25,
+                embedding_backend=self._embedder,
+            )
             self._memory_collection_store = store
         return store
 
@@ -265,7 +275,7 @@ class QdrantStore:
             store.delete_memory(record.memory_id)
             return
         text = memory_text(record)
-        vector = embedder.encode([text])[0]
+        vector = self._embedder.encode([text])[0]
         sparse = store._encode_sparse([text])[0]
         store._client.upsert(collection_name=store._collection, points=[qmodels.PointStruct(
             id=_chunk_id_to_int(record.memory_id),
@@ -301,24 +311,25 @@ class QdrantStore:
                         top_k: int = 5) -> list[dict]:
         """Search only active memories in scopes applicable to the current session."""
         store = self._memory_store()
-        scope_filters = [("session", session_id), ("user", owner_id)]
-        if project_id:
-            scope_filters.append(("project_id", project_id))
-        # Compatibility query for projections written before project IDs.
-        if project_scope:
-            scope_filters.append(("project_scope", project_scope))
+        scope_filters = applicable_memory_scopes(
+            owner_id=owner_id,
+            session_id=session_id,
+            project_id=project_id,
+            project_scope=project_scope,
+        )
         hits: list[dict] = []
-        for scope, scope_value in scope_filters:
+        for item in scope_filters:
             must = [
                 qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=owner_id)),
                 qmodels.FieldCondition(key="status", match=qmodels.MatchValue(value="active")),
                 qmodels.FieldCondition(key="user_confirmed", match=qmodels.MatchValue(value=True)),
-                qmodels.FieldCondition(key="scope", match=qmodels.MatchValue(value=scope)),
+                qmodels.FieldCondition(key="scope", match=qmodels.MatchValue(value=item.visibility_scope)),
             ]
-            if scope == "session":
-                must.append(qmodels.FieldCondition(key="session_id", match=qmodels.MatchValue(value=scope_value)))
-            elif scope in {"project_id", "project_scope"}:
-                must.append(qmodels.FieldCondition(key=scope, match=qmodels.MatchValue(value=scope_value)))
+            if item.constraint_field:
+                must.append(qmodels.FieldCondition(
+                    key=item.constraint_field,
+                    match=qmodels.MatchValue(value=item.constraint_value),
+                ))
             query_filter = qmodels.Filter(must=must)
             hits.extend(store.search(query_vector, query_text, top_k * 2, query_filter=query_filter))
         unique = {hit["memory_id"]: hit for hit in hits}

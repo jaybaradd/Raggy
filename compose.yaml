@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: raggy
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - raggy-postgres-data:/var/lib/postgresql/data
     healthcheck:

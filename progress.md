@@ -2,11 +2,70 @@
 
 ---
 
+### ✅ [2026-09-14] Project-memory retrieval filter correction
+
+- Corrected the Qdrant eligibility filter so project memories retain `scope=project` while project ID/name are applied as separate constraints.
+- This restores active project-memory retrieval across different chats in the same project; the prior filter incorrectly searched for nonexistent `scope=project_id` and `scope=project_scope` values.
+- Added a regression test for the exact cross-chat project-memory scenario.
+
+### ✅ [2026-09-14] One-command local PostgreSQL launcher
+
+- Added `scripts/run_postgres_dev.sh`, which loads the existing `.env`, selects Postgres authority, and uses separate fresh Qdrant, upload, and graph paths without storing credentials in code.
+- The normal `python main.py` path remains unchanged for archived SQLite compatibility; the launcher makes the intended fresh-Postgres UI path explicit and repeatable.
+
+### ✅ [2026-09-14] Postgres HTTP restart E2E
+
+- Added an opt-in black-box test that starts real Uvicorn processes against an isolated Postgres schema, local Qdrant directory, graph projection file, and upload directory.
+- The test creates a project and chat, streams deterministic test-provider turns through the public API, uploads and indexes a CSV, restarts the server, and verifies persisted history, ingestion status, and raw-source access through HTTP.
+- The test provider is confined to the test Uvicorn entry point; production Gemini behavior and configuration are unchanged. It uses cached local models only and never triggers a model download.
+
+### ✅ [2026-09-14] Durable evidence-to-Qdrant projection path
+
+- Evidence persistence now queues Qdrant projection work in the same durable store transaction; ingestion no longer writes vectors before the evidence record exists.
+- The projection worker reconstructs a retrieval chunk from durable evidence provenance, embeds it, writes it to Qdrant, and records completion or a retryable failure in the outbox.
+- SQLite now has the same evidence projection-outbox contract as PostgreSQL, including failed-job requeue and full rebuild enqueue support. Startup performs a bounded recovery pass.
+- Added deterministic worker/retry coverage and a separately opt-in test that uses a fresh Qdrant collection with the production Qdrant payload implementation.
+
+### ✅ [2026-09-14] Fresh PostgreSQL cutover decision
+
+- Confirmed that the current SQLite records are disposable test/development data; no SQLite-to-Postgres data migration will be performed.
+- SQLite databases, uploaded files, and current Qdrant data remain untouched as an archive and are not deleted.
+- The planned cutover initializes an empty Postgres authority, uses fresh Qdrant collections, and rebuilds derived graph/vector state only from new Postgres records.
+- FalkorDB remains a later rebuildable graph projection after Postgres authority, restart, backup, and projection-operation checks are complete.
+
+### ✅ [2026-09-14] Atomic PostgreSQL repository factory
+
+- The repository factory now constructs PostgreSQL sessions, memories, and evidence together or aborts startup without a SQLite fallback.
+- Added `POSTGRES_SCHEMA` for isolated tests and `GRAPH_DB_PATH` so Postgres-derived graph state never writes into the archived SQLite memory database.
+
+### ✅ [2026-09-14] Fresh Postgres backend E2E foundation
+
+- Added an opt-in, isolated-schema authority test that constructs the atomic factory, persists sessions/messages, evidence/ingestion status, and memories, then recreates the factory to verify Postgres-backed restart persistence.
+
 ### ✅ [2026-09-14] Optional Postgres development foundation
 
 - Added an opt-in Docker Compose Postgres 17 service with a persistent volume and health check, plus local Postgres connection configuration and the optional Psycopg driver dependency.
 - Added transactional Postgres logical migrations for sessions/messages and projects/memberships, mirroring the first authoritative SQLite schema versions without enabling Postgres as the live application backend.
 - SQLite remains the supported default while the remaining Postgres repositories are implemented and contract-tested.
+
+### ✅ [2026-09-14] PostgreSQL session repository (opt-in)
+- Added a PostgreSQL session/project/membership/message repository that preserves the SQLite contract, including owner isolation, attachment metadata, trace IDs, stable project IDs, and ordered turns.
+- Session turn allocation locks the parent session row to prevent concurrent writers from assigning the same turn index.
+- Added opt-in, isolated-schema integration coverage for a local Podman PostgreSQL service. The application factory intentionally remains SQLite-only until every authoritative repository has moved.
+
+### ✅ [2026-09-14] PostgreSQL memory repository (opt-in)
+- Added versioned PostgreSQL memory lifecycle, audit, conflict, extraction, access-history, relationship, and projection-outbox schema.
+- Added atomic lifecycle writes, event-domain advisory locks, conflict resolution locks, idempotent expiry transitions, and `FOR UPDATE SKIP LOCKED` projection claims with stale-worker lease recovery.
+- Added isolated-schema Podman integration coverage. The production repository factory remains SQLite-only pending the evidence and graph migration slices.
+
+### ✅ [2026-09-14] PostgreSQL evidence repository (opt-in)
+- Added immutable asset metadata, owner/project bindings, durable ingestion runs, immutable evidence segments, and Qdrant projection-outbox schema.
+- Evidence upserts are idempotent only when provenance is identical; a reused evidence ID with changed content/provenance fails instead of overwriting source history.
+- Added isolated-schema Podman tests for restart-safe ingestion status, owner/project evidence access, immutability, and outbox claims. SQLite remains the live default pending the explicit full-authority cutover.
+
+### ✅ [2026-09-14] Cutover prerequisite: durable ingestion status
+- Document ingestion now records processing/completed/failed runs through the evidence repository, allowing a status lookup to survive an application restart once the selected repository is durable.
+- Added a read-only PostgreSQL preflight command for connectivity and required schema-version checks.
 
 ### ✅ [2026-09-14] Repository contracts and backend-selection seam
 
