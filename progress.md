@@ -2,6 +2,67 @@
 
 ---
 
+### ✅ [2026-09-15] FalkorDB Phase G — Postgres development cutover
+
+- `scripts/run_postgres_dev.sh` now selects PostgreSQL authority and FalkorDB graph projection as one explicit development profile. Plain `python main.py` retains SQLite authority and the SQLite graph default.
+- Added one shared profile script for the app launcher and `scripts/rebuild_postgres_falkor_graph.sh`, preventing maintenance commands from accidentally rebuilding an archived SQLite graph.
+- Startup logs the selected authority, graph backend, and Falkor graph name. Repository construction remains the preflight: unavailable Postgres or FalkorDB aborts startup before requests are served, without fallback.
+- Added a repository-factory cutover test proving the Postgres/Falkor profile never constructs SQLite repository implementations.
+
+### ✅ [2026-09-15] FalkorDB Phase F — reliability verification
+
+- Extended the fake-client contract suite to prove parameterized Cypher writes, owner/project filtering, idempotent graph writes, inactive lifecycle handling, and rejection of cross-project edges.
+- Extended the opt-in Postgres/Falkor suite with isolated random schemas and graph names. It now verifies active-to-expired projection, related-edge idempotency, owner/project isolation, authoritative rebuild, and reading the rebuilt graph through a fresh adapter instance.
+- Verified locally with `RUN_FALKOR_INTEGRATION_TESTS=1` against Podman PostgreSQL and FalkorDB. Each test removes only its own random graph and schema.
+- FalkorDB remains derived and opt-in; `GRAPH_PROJECTION_BACKEND=sqlite` stays the default pending Phase G cutover.
+
+### ✅ [2026-09-15] FalkorDB Phase E — durable correction lineage
+
+- Accepted conflict resolutions and manual supersedes now persist an idempotent, owner-scoped `superseded_by` relationship with source, actor, optional conflict ID, details, and audit history.
+- Replaced the former manual-supersede `contradiction` write with precise `SUPERSEDED_BY` lifecycle semantics. Legacy contradiction rows remain readable but no new correction creates one.
+- Graph projection retains superseded source nodes as inactive historical context and projects `SUPERSEDED_BY` to the active replacement. Phase D traversal explicitly follows only `RELATED` edges, so superseded records cannot re-enter prompt context.
+- Added `GET /api/memories/{memory_id}/relationships` and relationship history in the memory browser.
+
+### ✅ [2026-09-15] FalkorDB Phase D — graph-assisted memory discovery
+
+- Added optional, one-hop graph expansion to the pre-response memory planner. It starts only from exact/Postgres or Qdrant candidates, returns relationship provenance rather than graph payloads, and rehydrates every graph ID from the authoritative memory repository before planner selection.
+- Graph candidates are never included in exact-match fallback context. Planner approval, owner isolation, project/session scope, active status, confirmation, and validity windows remain mandatory.
+- Added `GRAPH_MEMORY_EXPANSION_ENABLED=false` and a bounded `GRAPH_MEMORY_EXPANSION_LIMIT=4`; graph expansion is opt-in and failure-safe.
+- Added graph candidate provenance and expansion status to the existing memory SSE payload and access-event details.
+- Repository field access is now method-lazy, so router imports no longer establish optional backend connections. Application startup remains the first explicit repository construction point.
+
+### ✅ [2026-09-15] FalkorDB graph projection hardening
+
+- Scoped authoritative relationship reads by `owner_id` before graph-edge projection, closing the last cross-owner graph discovery seam.
+- Added an explicit, backend-neutral graph rebuild service and `scripts/rebuild_graph_projection.py`. It clears only the selected derived graph, re-enqueues only graph jobs, and never initializes, consumes, or modifies Qdrant work.
+- Made the repository provider lazy. Optional FalkorDB connectivity is now resolved during FastAPI startup rather than while importing routers or utility modules.
+- Added both fake-client contract coverage and opt-in real Postgres-to-Falkor integration coverage. The integration test uses a random schema and graph name and removes both afterward.
+
+### ✅ [2026-09-15] Multi-event correction reconciliation
+
+- A correction turn with multiple extracted events now associates each event independently with one high-confidence planner-selected memory using conservative entity-subject overlap.
+- This opens separate review conflicts for independent changes in the same turn while excluding time/status-only matching and retaining ambiguous cases as safe review candidates.
+
+### ✅ [2026-09-14] FalkorDB graph projection adapter and local runtime profile
+
+- Added the optional, pinned `FalkorDB` Python client and `FalkorGraphStore`, which implements the same conservative graph repository contract as SQLite with idempotent memory-node and durable relationship-edge writes.
+- Added an opt-in Podman Compose `falkor` profile using the FalkorDB development image, persistent AOF-backed storage, localhost-only server/browser ports (`6380`/`3001`), and a health check.
+- Added explicit `GRAPH_PROJECTION_BACKEND`, `FALKORDB_URL`, and `FALKORDB_GRAPH_NAME` settings. SQLite remains the default; choosing Falkor makes repository initialization fail clearly if its service is unavailable.
+- The Podman profile pins the multi-architecture `falkordb/falkordb:v4.20.4` image after validating its published tag; the earlier unprefixed `4.0.0` tag was not available.
+- Validated the installed FalkorDB client against the local container and corrected its connection path to `FalkorDB.from_url(...)`; empty named-graph reads now return an empty projection result until the first memory is written.
+
+### ✅ [2026-09-14] FalkorDB preparation — conservative memory graph model
+
+- Replaced the SQLite projection's extracted entity/concept graph with a lossless memory-node model: one node per authoritative memory, retaining lifecycle fields and serialized payload details.
+- Durable `memory_relationships` now provide the only graph edges. `RELATED` edges project only while both endpoint memories are active, confirmed, and in their validity window; open conflicts never invent a contradiction edge.
+- Added backend-neutral graph node/relationship contracts, PostgreSQL and SQLite relationship readers, exact `project_id`-first filtering, and lifecycle-safe removal of stale incident edges.
+
+### ✅ [2026-09-14] FalkorDB preparation — explicit graph projection seam
+
+- Memory projection dispatch now requires an explicit `GraphRepository`; it no longer silently imports the module-level SQLite graph singleton.
+- Startup repair, post-turn extraction, expiry, memory lifecycle APIs, and projection/rebuild scripts all forward the repository factory's selected graph implementation.
+- Added regression coverage proving the explicit graph target receives queued graph work, making a future FalkorDB adapter a normal repository substitution rather than a special path.
+
 ### ✅ [2026-09-14] Deterministic high-confidence correction fallback
 
 - A single selected, scope-eligible memory with planner relation `updates` and confidence at least 0.90 now creates a generic review conflict directly from claim differences; it no longer depends on a second structured LLM call succeeding.

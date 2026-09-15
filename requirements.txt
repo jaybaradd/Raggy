@@ -33,3 +33,4 @@ pydantic-settings>=2.3.0,<3.0.0
 python-dotenv>=1.0.0
 tiktoken>=0.7.0
 psycopg[binary]>=3.2,<4.0  # optional Postgres backend / contract testing
+FalkorDB==1.6.0            # optional rebuildable graph projection backend

@@ -220,7 +220,7 @@ Implementation order:
 3. Add a durable projection outbox, retries, status inspection, and rebuild support.
 4. Add contradiction candidate detection and review APIs.
 5. Initialize a fresh Postgres authority, run Postgres-backed UI/restart checks, and rebuild fresh vector/graph projections.
-6. Add FalkorDB as a rebuildable graph projection and validate it against the local graph projection.
+6. Add FalkorDB as a rebuildable graph projection and validate it against the local graph projection. **Completed locally:** contract, lifecycle, isolation, rebuild, and adapter-restart checks run against isolated Postgres/Falkor test resources; Phase G remains the safe-default cutover decision.
 7. Add graph/vector fused retrieval and multi-hop planning in Phase 3.
 
 ### Exit criteria

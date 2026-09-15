@@ -38,7 +38,7 @@ def _project(owner_id: str, project_id: str | None, project_scope: str | None) -
 def _sync_projection(record) -> None:
     """Projection failure must not roll back the authoritative memory change."""
     try:
-        sync_pending_projections(store=memory_store)
+        sync_pending_projections(store=memory_store, graph=graph_store)
     except Exception:
         logger.exception("Memory projection sync failed for %s", record.memory_id)
 
@@ -98,7 +98,7 @@ def expire_due_memories(owner_id: str = Header(default="default", alias="X-Owner
     expired = memory_store.expire_due(owner_id=_owner(owner_id))
     if expired:
         try:
-            sync_pending_projections(store=memory_store)
+            sync_pending_projections(store=memory_store, graph=graph_store)
         except Exception:
             logger.exception("Memory projection sync failed after expiry sweep")
     return {"expired_count": len(expired), "memory_ids": [record.memory_id for record in expired]}
@@ -143,6 +143,15 @@ def resolve_conflict(conflict_id: int, body: MemoryConflictResolutionRequest,
 def get_memory_audit(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
     try:
         return {"events": memory_store.list_audit_events(memory_id, owner_id=_owner(owner_id))}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Memory not found") from None
+
+
+@router.get("/{memory_id}/relationships")
+def get_memory_relationships(memory_id: str, owner_id: str = Header(default="default", alias="X-Owner-ID")):
+    """Return authoritative lifecycle/related links for one memory."""
+    try:
+        return {"relationships": memory_store.list_relationships(memory_id, owner_id=_owner(owner_id))}
     except KeyError:
         raise HTTPException(status_code=404, detail="Memory not found") from None
 

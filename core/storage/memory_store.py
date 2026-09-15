@@ -17,6 +17,7 @@ from core.memory.models import (
 )
 from core.memory.identity import (events_are_comparable, event_differences, event_identity_key,
                                   legacy_identifier_values)
+from core.memory.graph_projection import MemoryGraphRelationship, is_memory_projectable
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,10 @@ class MemoryStore:
                     from_memory_id TEXT NOT NULL,
                     to_memory_id TEXT NOT NULL,
                     relationship_type TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'system',
+                    conflict_id INTEGER,
+                    created_by TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(from_memory_id) REFERENCES memory_records(memory_id),
                     FOREIGN KEY(to_memory_id) REFERENCES memory_records(memory_id)
@@ -155,6 +160,13 @@ class MemoryStore:
                 connection.execute("ALTER TABLE memory_records ADD COLUMN project_id TEXT")
             if "identity_key" not in columns:
                 connection.execute("ALTER TABLE memory_records ADD COLUMN identity_key TEXT")
+            relationship_columns = {row["name"] for row in connection.execute("PRAGMA table_info(memory_relationships)")}
+            for name, definition in (
+                ("source", "TEXT NOT NULL DEFAULT 'system'"), ("conflict_id", "INTEGER"),
+                ("created_by", "TEXT"), ("details_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if name not in relationship_columns:
+                    connection.execute(f"ALTER TABLE memory_relationships ADD COLUMN {name} {definition}")
             connection.execute("""CREATE INDEX IF NOT EXISTS idx_memory_event_identity
                                 ON memory_records(owner_id, scope, session_id, project_scope, identity_key)""")
             for row in connection.execute("SELECT * FROM memory_records WHERE kind = 'event'").fetchall():
@@ -170,6 +182,7 @@ class MemoryStore:
                 Migration(3, "project_id_propagation", lambda _: None),
                 Migration(4, "memory_identifier_references", lambda _: None),
                 Migration(5, "memory_relationship_uniqueness", lambda _: None),
+                Migration(6, "relationship_provenance", lambda _: None),
             ])
     def record_access_event(self, *, trace_id: str, session_id: str, memory_id: str,
                             event_type: str, message_id: str | None = None,
@@ -377,20 +390,104 @@ class MemoryStore:
             self._upsert_locked(connection, record, event_type=event_type, actor_id=actor_id, details=details, now=now)
             if outcome == "related":
                 assert existing is not None
-                self._link_locked(connection, record.memory_id, existing.memory_id, "related", now)
+                self._link_locked(connection, record.memory_id, existing.memory_id, "related", now,
+                                  source="reconciliation", created_by=actor_id)
             return EventCaptureResult("created" if outcome in {"new", "related"} else "uncertain", record)
 
     @staticmethod
     def _link_locked(connection: sqlite3.Connection, first_memory_id: str, second_memory_id: str,
-                     relationship_type: str, now: datetime) -> None:
+                     relationship_type: str, now: datetime, *, source: str = "system",
+                     conflict_id: int | None = None, created_by: str | None = None,
+                     details: dict | None = None) -> None:
         """Create a stable, idempotent link for graph projection."""
         if relationship_type == "related":
             first_memory_id, second_memory_id = sorted((first_memory_id, second_memory_id))
         connection.execute(
             """INSERT OR IGNORE INTO memory_relationships
-               (from_memory_id, to_memory_id, relationship_type, created_at) VALUES (?, ?, ?, ?)""",
-            (first_memory_id, second_memory_id, relationship_type, now.isoformat()),
+               (from_memory_id, to_memory_id, relationship_type, source, conflict_id, created_by, details_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (first_memory_id, second_memory_id, relationship_type, source, conflict_id, created_by,
+             json.dumps(details or {}, sort_keys=True), now.isoformat()),
         )
+
+    def list_graph_relationships(self, *, owner_id: str,
+                                 memory_id: str | None = None) -> list[MemoryGraphRelationship]:
+        """Return only authoritative links whose endpoint records can be traversed.
+
+        Relationship rows remain authoritative lifecycle history; this method
+        intentionally derives the smaller graph-safe view at read time.
+        """
+        clauses: list[str] = [
+            "relationships.relationship_type IN ('related', 'contradiction', 'superseded_by')",
+            "source.owner_id = ?",
+        ]
+        params: list[object] = [owner_id]
+        if memory_id is not None:
+            clauses.append("(relationships.from_memory_id = ? OR relationships.to_memory_id = ?)")
+            params.extend([memory_id, memory_id])
+        with self._connect() as connection:
+            rows = connection.execute(f"""
+                SELECT relationships.relationship_id, relationships.relationship_type,
+                       relationships.created_at AS relationship_created_at,
+                       source.*, target.memory_id AS target_memory_id,
+                       target.owner_id AS target_owner_id, target.scope AS target_scope,
+                       target.session_id AS target_session_id, target.project_id AS target_project_id,
+                       target.project_scope AS target_project_scope, target.kind AS target_kind,
+                       target.status AS target_status, target.confidence AS target_confidence,
+                       target.user_confirmed AS target_user_confirmed,
+                       target.evidence_refs_json AS target_evidence_refs_json,
+                       target.source_turn_id AS target_source_turn_id,
+                       target.extraction_model AS target_extraction_model,
+                       target.extraction_version AS target_extraction_version,
+                       target.identity_key AS target_identity_key, target.valid_from AS target_valid_from,
+                       target.valid_to AS target_valid_to, target.superseded_by AS target_superseded_by,
+                       target.payload_json AS target_payload_json, target.created_at AS target_created_at,
+                       target.updated_at AS target_updated_at
+                FROM memory_relationships relationships
+                JOIN memory_records source ON source.memory_id = relationships.from_memory_id
+                JOIN memory_records target ON target.memory_id = relationships.to_memory_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY relationships.relationship_id
+            """, params).fetchall()
+        relationships: list[MemoryGraphRelationship] = []
+        for row in rows:
+            source = self._from_row(row)
+            target = MemoryRecord.model_validate({
+                "memory_id": row["target_memory_id"], "owner_id": row["target_owner_id"],
+                "scope": row["target_scope"], "session_id": row["target_session_id"],
+                "project_id": row["target_project_id"], "project_scope": row["target_project_scope"],
+                "kind": row["target_kind"], "status": row["target_status"],
+                "confidence": row["target_confidence"], "user_confirmed": row["target_user_confirmed"],
+                "evidence_refs": json.loads(row["target_evidence_refs_json"]),
+                "source_turn_id": row["target_source_turn_id"],
+                "extraction_model": row["target_extraction_model"],
+                "extraction_version": row["target_extraction_version"],
+                "identity_key": row["target_identity_key"], "valid_from": row["target_valid_from"],
+                "valid_to": row["target_valid_to"], "superseded_by": row["target_superseded_by"],
+                "payload": json.loads(row["target_payload_json"]),
+                "created_at": row["target_created_at"], "updated_at": row["target_updated_at"],
+            })
+            relationship = MemoryGraphRelationship(
+                relationship_id=str(row["relationship_id"]), relationship_type=row["relationship_type"],
+                from_record=source, to_record=target,
+                created_at=datetime.fromisoformat(row["relationship_created_at"]),
+            )
+            if not relationship.is_projectable:
+                continue
+            relationships.append(relationship)
+        return relationships
+
+    def list_relationships(self, memory_id: str, *, owner_id: str) -> list[dict]:
+        if self.get_owned(memory_id, owner_id=owner_id) is None:
+            raise KeyError(f"Memory '{memory_id}' not found")
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT relationship_id, from_memory_id, to_memory_id,
+                relationship_type, source, conflict_id, created_by, details_json, created_at
+                FROM memory_relationships WHERE from_memory_id=? OR to_memory_id=? ORDER BY relationship_id DESC""",
+                (memory_id, memory_id)).fetchall()
+        return [{**dict(row), "details": json.loads(row["details_json"] or "{}"),
+                 "peer_memory_id": row["to_memory_id"] if row["from_memory_id"] == memory_id else row["from_memory_id"]}
+                for row in rows]
 
     @staticmethod
     def _enqueue_projection_locked(connection: sqlite3.Connection, memory_id: str,
@@ -407,12 +504,22 @@ class MemoryStore:
             (memory_id, target, now, now),
         )
 
-    def claim_projection_jobs(self, *, limit: int = 50) -> list[dict]:
+    def claim_projection_jobs(self, *, limit: int = 50,
+                              targets: set[str] | None = None) -> list[dict]:
         """Claim pending projection work. Failed jobs are retried by re-enqueueing a record."""
         now = datetime.now(timezone.utc).isoformat()
+        target_clause = ""
+        target_params: list[object] = []
+        if targets is not None:
+            if not targets or not targets <= {"qdrant", "graph"}:
+                raise ValueError("targets must contain qdrant and/or graph")
+            placeholders = ", ".join("?" for _ in targets)
+            target_clause = f" AND target IN ({placeholders})"
+            target_params = sorted(targets)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM memory_projection_jobs WHERE status = 'pending' ORDER BY updated_at LIMIT ?", (limit,)
+                f"SELECT * FROM memory_projection_jobs WHERE status = 'pending'{target_clause} ORDER BY updated_at LIMIT ?",
+                [*target_params, limit],
             ).fetchall()
             jobs = [dict(row) for row in rows]
             for job in jobs:
@@ -477,16 +584,18 @@ class MemoryStore:
                 expired.append(record)
         return expired
 
-    def enqueue_all_projections(self) -> int:
-        """Schedule a full rebuild of derived graph and vector projections."""
+    def enqueue_all_projections(self, *, targets: tuple[str, ...] = ("qdrant", "graph")) -> int:
+        """Schedule one or more full derived-projection rebuilds."""
+        if not targets or not set(targets) <= {"qdrant", "graph"}:
+            raise ValueError("targets must contain qdrant and/or graph")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             memory_ids = [row["memory_id"] for row in connection.execute(
                 "SELECT memory_id FROM memory_records"
             ).fetchall()]
             for memory_id in memory_ids:
-                self._enqueue_projection_locked(connection, memory_id, "qdrant", now)
-                self._enqueue_projection_locked(connection, memory_id, "graph", now)
+                for target in targets:
+                    self._enqueue_projection_locked(connection, memory_id, target, now)
         return len(memory_ids)
 
     def list_projection_jobs(self, *, owner_id: str, status: str | None = None,
@@ -561,10 +670,8 @@ class MemoryStore:
                 self._upsert_locked(connection, incoming, event_type="conflict_accepted", actor_id=actor_id,
                                     details={"conflict_id": conflict_id}, now=now)
                 if action == "supersede_existing":
-                    existing.status = "superseded"
-                    existing.superseded_by = incoming.memory_id
-                    self._upsert_locked(connection, existing, event_type="superseded", actor_id=actor_id,
-                                        details={"conflict_id": conflict_id, "replacement_memory_id": incoming.memory_id}, now=now)
+                    self._supersede_locked(connection, existing, incoming, actor_id=actor_id, now=now,
+                                           source="conflict_resolution", conflict_id=conflict_id)
                 else:
                     existing.status = "expired"
                     existing.valid_to = now
@@ -578,6 +685,20 @@ class MemoryStore:
                 (actor_id, json.dumps(resolution, sort_keys=True), now.isoformat(), conflict_id),
             )
         return self.get_conflict(conflict_id, owner_id=actor_id) or conflict
+
+    def _supersede_locked(self, connection: sqlite3.Connection, existing: MemoryRecord,
+                          replacement: MemoryRecord, *, actor_id: str, now: datetime,
+                          source: str, conflict_id: int | None = None) -> None:
+        existing.status, existing.superseded_by = "superseded", replacement.memory_id
+        details = {"replacement_memory_id": replacement.memory_id, "relationship": "superseded_by"}
+        if conflict_id is not None:
+            details["conflict_id"] = conflict_id
+        self._upsert_locked(connection, existing, event_type="superseded", actor_id=actor_id,
+                            details=details, now=now)
+        self._link_locked(connection, existing.memory_id, replacement.memory_id, "superseded_by", now,
+                          source=source, conflict_id=conflict_id, created_by=actor_id, details=details)
+        self._audit_locked(connection, replacement.memory_id, "replacement_linked", actor_id,
+                           {"replaces_memory_id": existing.memory_id, **details}, now)
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection:
@@ -820,9 +941,11 @@ class MemoryStore:
         record.status = "superseded"
         record.superseded_by = replacement.memory_id
         self.upsert(record, event_type="superseded", actor_id=actor_id,
-                    details={"replacement_memory_id": replacement.memory_id, "relationship": "contradiction"})
+                    details={"replacement_memory_id": replacement.memory_id, "relationship": "superseded_by"})
         with self._lock, self._connect() as connection:
-            self._link_locked(connection, record.memory_id, replacement.memory_id, "contradiction", datetime.now(timezone.utc))
+            self._link_locked(connection, record.memory_id, replacement.memory_id, "superseded_by", datetime.now(timezone.utc),
+                              source="manual_supersede", created_by=actor_id,
+                              details={"replacement_memory_id": replacement.memory_id})
         return record
 
     def _owned(self, memory_id: str, owner_id: str) -> MemoryRecord:

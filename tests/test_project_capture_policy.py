@@ -11,6 +11,7 @@ from unittest.mock import patch
 from core.memory.extractor import ExtractionBatch, MemoryCandidate
 from core.memory.jobs import extract_turn_memories
 from core.memory.policy import decide_project_capture
+from core.storage.graph_store import GraphStore
 from core.storage.memory_store import MemoryStore
 
 
@@ -83,14 +84,17 @@ class ProjectCaptureJobTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             store = MemoryStore(str(Path(directory) / "memory.sqlite3"))
-            with patch("core.memory.jobs.sync_pending_projections", return_value={"completed": 2, "failed": 0}):
+            graph = GraphStore(str(Path(directory) / "graph.sqlite3"))
+            with patch("core.memory.jobs.sync_pending_projections", return_value={"completed": 2, "failed": 0}) as sync:
                 created = await extract_turn_memories(
                     store=store, extractor=FakeExtractor(), source_turn_id="turn-1",
                     session_id="session-a", project_scope="imports", owner_id="user-1",
                     user_content="I have a shipment coming from Tokyo in 2 days by flight cargo.",
                     assistant_content="I will help track the shipment.", evidence_refs=[],
+                    graph=graph,
                 )
 
+            self.assertIs(sync.call_args.kwargs["graph"], graph)
             self.assertEqual(created, 1)
             record = store.list(owner_id="user-1", scope="project", project_scope="imports")[0]
             self.assertEqual(record.kind, "event")

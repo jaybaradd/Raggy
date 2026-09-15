@@ -14,14 +14,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.memory.projections import sync_pending_projections
-from core.storage.memory_store import memory_store
+from db.repository_factory import repositories
 
 
 def main() -> None:
+    memory_store = repositories.memories
     scheduled = memory_store.enqueue_all_projections()
     total = {"completed": 0, "failed": 0}
     while True:
-        result = sync_pending_projections(store=memory_store, limit=100)
+        result = sync_pending_projections(store=memory_store, graph=repositories.graph, limit=100)
         total["completed"] += result["completed"]
         total["failed"] += result["failed"]
         if result["completed"] + result["failed"] == 0:

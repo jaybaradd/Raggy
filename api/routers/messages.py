@@ -36,6 +36,7 @@ from core.retrieval.engine import RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_
 from core.retrieval.memory import build_memory_context
 memory_store = repositories.memories
 session_store = repositories.sessions
+graph_store = repositories.graph
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])
@@ -97,6 +98,7 @@ async def send_message(
         project_id=session.get("project_id"),
         project_scope=session.get("project_scope"),
         store=memory_store,
+        graph=graph_store,
         planner_provider=gemini_provider,
     )
     if memory_result.context:
@@ -123,6 +125,9 @@ async def send_message(
                      "selection_source": memory.get("selection_source"),
                      "selection_relation": memory.get("selection_relation"),
                      "selection_confidence": memory.get("selection_confidence"),
+                     "graph_seed_memory_id": memory.get("graph_seed_memory_id"),
+                     "graph_relationship_id": memory.get("graph_relationship_id"),
+                     "graph_relationship_type": memory.get("graph_relationship_type"),
                      "planner_status": memory_result.planner_status},
         )
         memory_store.record_access_event(
@@ -138,6 +143,9 @@ async def send_message(
                      "selection_source": memory.get("selection_source"),
                      "selection_relation": memory.get("selection_relation"),
                      "selection_confidence": memory.get("selection_confidence"),
+                     "graph_seed_memory_id": memory.get("graph_seed_memory_id"),
+                     "graph_relationship_id": memory.get("graph_relationship_id"),
+                     "graph_relationship_type": memory.get("graph_relationship_type"),
                      "planner_status": memory_result.planner_status},
         )
     if memory_result.memories:
@@ -200,7 +208,12 @@ async def send_message(
             messages=messages,
             sources=sources,
             memories=memory_result.memories,
-            memory_planner={"status": memory_result.planner_status, "rationale": memory_result.rationale},
+            memory_planner={
+                "status": memory_result.planner_status,
+                "rationale": memory_result.rationale,
+                "graph_status": memory_result.graph_status,
+                "candidate_counts": memory_result.candidate_counts or {},
+            },
             reconciliation_hints=memory_result.reconciliation_hints or [],
             user_content=body.content,
             trace_id=trace_id,
@@ -267,6 +280,7 @@ async def _stream_response(
         assistant_content=complete_reply,
         evidence_refs=evidence_refs,
         reconciliation_hints=reconciliation_hints,
+        graph=graph_store,
     ))
 
     # Signal end of stream

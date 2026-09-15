@@ -51,6 +51,9 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         self.assertEqual(resolved["status"], "resolved")
         self.assertEqual(self.store.get(existing.record.memory_id).status, "superseded")
         self.assertEqual(self.store.get(conflict.record.memory_id).status, "active")
+        relationship = self.store.list_relationships(existing.record.memory_id, owner_id="owner-a")[0]
+        self.assertEqual(relationship["relationship_type"], "superseded_by")
+        self.assertEqual(relationship["conflict_id"], conflict.conflict_id)
         self.assertIn("duplicate_detected", [event["event_type"] for event in self.store.list_audit_events(existing.record.memory_id, owner_id="owner-a")])
 
         from db.postgres_memory_store import PostgresMemoryRepository

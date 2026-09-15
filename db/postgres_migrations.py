@@ -142,9 +142,15 @@ def memory_migrations() -> list[PostgresMigration]:
     def relationship_uniqueness(cursor: Any) -> None:
         cursor.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_relationship
             ON memory_relationships(from_memory_id, to_memory_id, relationship_type)""")
+    def relationship_provenance(cursor: Any) -> None:
+        cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'system'")
+        cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS conflict_id BIGINT")
+        cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS created_by TEXT")
+        cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS details_json JSONB NOT NULL DEFAULT '{}'::jsonb")
     return [PostgresMigration(1, "memory_records_lifecycle_and_outbox", initial),
             PostgresMigration(2, "memory_identifier_references", identifier_references),
-            PostgresMigration(3, "memory_relationship_uniqueness", relationship_uniqueness)]
+            PostgresMigration(3, "memory_relationship_uniqueness", relationship_uniqueness),
+            PostgresMigration(4, "relationship_provenance", relationship_provenance)]
 
 
 def evidence_migrations() -> list[PostgresMigration]:

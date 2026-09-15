@@ -1,12 +1,15 @@
-"""Deterministic tests for the rebuildable graph-compatible memory projection."""
+"""Regression tests for the conservative, rebuildable memory graph model."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from core.memory.models import EntityMemory, EventMemory, KnowledgeAtom, MemoryRecord
+from core.memory.graph_projection import MemoryGraphRelationship
+from core.memory.models import EventMemory, KnowledgeAtom, MemoryRecord
 from core.memory.projections import sync_pending_projections
 from core.storage.graph_store import GraphStore
 from core.storage.memory_store import MemoryStore
@@ -15,99 +18,173 @@ from core.storage.memory_store import MemoryStore
 class GraphProjectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.temp_dir.name) / "memory.sqlite3")
-        self.graph = GraphStore(self.db_path)
-        self.store = MemoryStore(self.db_path)
+        self.store = MemoryStore(str(Path(self.temp_dir.name) / "memory.sqlite3"))
+        self.graph = GraphStore(str(Path(self.temp_dir.name) / "graph.sqlite3"))
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_alias_resolution_projects_one_edge_with_provenance(self) -> None:
-        entity = MemoryRecord(
-            owner_id="user-1", scope="project", project_scope="biology",
-            kind="entity", status="active", user_confirmed=True,
-            source_turn_id="turn-entity", evidence_refs=["ev-entity"],
-            payload=EntityMemory(
-                canonical_name="Michaelis-Menten Equation", entity_type="concept",
-                aliases=["MM equation"],
-            ),
+    @staticmethod
+    def _record(*, owner_id: str = "user-1", project_id: str | None = None,
+                status: str = "active", valid_to: datetime | None = None) -> MemoryRecord:
+        return MemoryRecord(
+            owner_id=owner_id, scope="project" if project_id else "user", project_id=project_id,
+            project_scope="imports" if project_id else None, kind="event", status=status,
+            user_confirmed=status == "active", confidence=0.9, source_turn_id="turn-1", valid_to=valid_to,
+            payload=EventMemory(event_type="shipment arrival", summary="Order EK420 arrives from Dubai",
+                                entities=["EK420"], locations=["Dubai"], temporal_scope="Tuesday"),
         )
-        atom = MemoryRecord(
-            owner_id="user-1", scope="project", project_scope="biology",
-            kind="knowledge", status="active", user_confirmed=True, confidence=0.91,
-            source_turn_id="turn-atom", evidence_refs=["ev-page-12"],
-            payload=KnowledgeAtom(
-                subject="Enzyme Kinetics", predicate="requires understanding of",
-                object="MM equation", qualifiers={"course": "biology"},
-            ),
+
+    def test_memory_node_is_lossless_and_project_id_is_preferred(self) -> None:
+        record = self._record(project_id="project-imports")
+        self.graph.sync_memory(record)
+
+        nodes = self.graph.list_nodes(owner_id="user-1", project_id="project-imports")
+
+        self.assertEqual(len(nodes), 1)
+        node = nodes[0]
+        self.assertEqual(node["memory_id"], record.memory_id)
+        self.assertEqual(node["project_id"], "project-imports")
+        self.assertEqual(node["status"], "active")
+        self.assertEqual(node["is_active"], 1)
+        self.assertEqual(json.loads(node["payload_json"])["entities"], ["EK420"])
+        self.assertEqual(self.graph.list_nodes(owner_id="other-user", active=None), [])
+
+    def test_relationship_requires_two_eligible_endpoint_memories(self) -> None:
+        source = self._record(project_id="project-imports")
+        target = self._record(project_id="project-imports")
+        relationship = MemoryGraphRelationship("related-1", "related", source, target, datetime.now(timezone.utc))
+
+        self.graph.sync_relationship(relationship)
+        self.assertEqual(len(self.graph.list_edges(owner_id="user-1", project_id="project-imports")), 1)
+
+        target.status = "expired"
+        target.user_confirmed = True
+        self.graph.sync_memory(target)
+        self.assertEqual(self.graph.list_edges(owner_id="user-1", project_id="project-imports"), [])
+
+    def test_expired_memory_is_retained_as_inactive_node(self) -> None:
+        record = self._record(valid_to=datetime.now(timezone.utc) - timedelta(seconds=1))
+        self.graph.sync_memory(record)
+
+        self.assertEqual(self.graph.list_nodes(owner_id="user-1"), [])
+        nodes = self.graph.list_nodes(owner_id="user-1", active=None)
+        self.assertEqual(nodes[0]["status"], "active")
+        self.assertEqual(nodes[0]["is_active"], 0)
+
+    def test_open_conflict_does_not_create_a_graph_contradiction(self) -> None:
+        existing = self._record(project_id="project-imports")
+        incoming = self._record(project_id="project-imports")
+        self.store.upsert(existing)
+        self.store.apply_event_reconciliation(
+            incoming, outcome="update", existing_memory_id=existing.memory_id,
+            details={"changed_claims": {"temporal_scope": {"existing": "Tuesday", "incoming": "Thursday"}}},
         )
-        self.graph.sync_memory(entity)
-        self.graph.sync_memory(atom)
 
-        edges = self.graph.list_edges(owner_id="user-1", scope="project", project_scope="biology")
-        self.assertEqual(len(edges), 1)
-        edge = edges[0]
-        self.assertEqual(edge["predicate"], "requires_understanding_of")
-        self.assertEqual(edge["relation_family"], "dependency")
-        self.assertEqual(edge["memory_id"], atom.memory_id)
-        self.assertEqual(edge["provenance_kind"], "evidence")
-        self.assertIn("ev-page-12", edge["evidence_refs_json"])
-
-        nodes = {node["node_id"]: node for node in self.graph.list_nodes(
-            owner_id="user-1", scope="project", project_scope="biology"
-        )}
-        self.assertEqual(nodes[edge["object_node_id"]]["canonical_label"], "Michaelis-Menten Equation")
-
-    def test_inactive_memory_deactivates_its_edge_without_deleting_nodes(self) -> None:
-        atom = MemoryRecord(
-            owner_id="user-1", scope="user", kind="knowledge", status="active", user_confirmed=True,
-            source_turn_id="turn-1", evidence_refs=["ev-1"],
-            payload=KnowledgeAtom(subject="A", predicate="causes", object="B"),
+        self.assertEqual(
+            self.store.list_graph_relationships(owner_id="user-1", memory_id=existing.memory_id), [],
         )
-        self.graph.sync_memory(atom)
-        atom.status = "expired"
-        self.graph.sync_memory(atom)
-        self.assertEqual(self.graph.list_edges(owner_id="user-1", scope="user"), [])
-        self.assertGreaterEqual(len(self.graph.list_nodes(owner_id="user-1", scope="user")), 2)
 
-    def test_project_event_projects_to_a_provenance_linked_graph_edge(self) -> None:
-        event = MemoryRecord(
-            owner_id="user-1", scope="project", project_scope="imports",
-            kind="event", status="active", user_confirmed=True, confidence=0.9,
-            source_turn_id="turn-shipment",
-            payload=EventMemory(
-                event_type="shipment", summary="Flight-cargo shipment arriving from Tokyo",
-                entities=["shipment", "flight cargo"], locations=["Tokyo"], temporal_scope="in 2 days",
-            ),
-        )
-        self.graph.sync_memory(event)
-
-        edge = self.graph.list_edges(owner_id="user-1", scope="project", project_scope="imports")[0]
-        self.assertEqual(edge["predicate"], "relates_to")
-        self.assertEqual(edge["relation_family"], "association")
-        self.assertEqual(edge["provenance_kind"], "conversation")
-
-    def test_outbox_projects_authoritative_memory_and_records_completion(self) -> None:
+    def test_outbox_projects_authoritative_related_link(self) -> None:
         class FakeQdrant:
+            def upsert_memory(self, _record: MemoryRecord) -> None:
+                pass
+
+        existing = self._record(project_id="project-imports")
+        incoming = self._record(project_id="project-imports")
+        self.store.upsert(existing)
+        self.store.apply_event_reconciliation(
+            incoming, outcome="related", existing_memory_id=existing.memory_id, details={},
+        )
+
+        result = sync_pending_projections(store=self.store, graph=self.graph, qdrant=FakeQdrant())
+
+        self.assertEqual(result, {"completed": 4, "failed": 0})
+        edges = self.graph.list_edges(owner_id="user-1", project_id="project-imports")
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["relationship_type"], "RELATED")
+
+    def test_outbox_uses_the_explicit_graph_repository(self) -> None:
+        class RecordingGraph:
             def __init__(self) -> None:
                 self.memory_ids: list[str] = []
 
-            def upsert_memory(self, record: MemoryRecord) -> None:
+            def sync_memory(self, record: MemoryRecord) -> None:
                 self.memory_ids.append(record.memory_id)
+
+            def sync_relationship(self, _relationship: MemoryGraphRelationship) -> None:
+                pass
+
+            def remove_relationship(self, _relationship_id: str) -> None:
+                pass
+
+        class FakeQdrant:
+            def upsert_memory(self, _record: MemoryRecord) -> None:
+                pass
 
         record = MemoryRecord(
             owner_id="user-1", scope="user", kind="knowledge", status="active", user_confirmed=True,
-            source_turn_id="turn-outbox", evidence_refs=["ev-outbox"],
-            payload=KnowledgeAtom(subject="A", predicate="supports", object="B"),
+            source_turn_id="turn-explicit-graph", payload=KnowledgeAtom(subject="A", predicate="supports", object="B"),
         )
         self.store.upsert(record)
-        qdrant = FakeQdrant()
-        result = sync_pending_projections(store=self.store, graph=self.graph, qdrant=qdrant)
+        graph = RecordingGraph()
+
+        result = sync_pending_projections(store=self.store, graph=graph, qdrant=FakeQdrant())
+
         self.assertEqual(result, {"completed": 2, "failed": 0})
-        self.assertEqual(qdrant.memory_ids, [record.memory_id])
-        self.assertEqual(len(self.graph.list_edges(owner_id="user-1", scope="user")), 1)
-        jobs = self.store.list_projection_jobs(owner_id="user-1")
-        self.assertEqual({job["status"] for job in jobs}, {"completed"})
+        self.assertEqual(graph.memory_ids, [record.memory_id])
+
+    def test_relationship_reads_are_scoped_to_the_requested_owner(self) -> None:
+        source = self._record(owner_id="user-1", project_id="project-imports")
+        target = self._record(owner_id="user-1", project_id="project-imports")
+        self.store.upsert(source)
+        self.store.upsert(target)
+        self.store.apply_event_reconciliation(
+            target, outcome="related", existing_memory_id=source.memory_id, details={},
+        )
+
+        self.assertEqual(
+            self.store.list_graph_relationships(owner_id="another-owner", memory_id=source.memory_id), [],
+        )
+        self.assertEqual(
+            len(self.store.list_graph_relationships(owner_id="user-1", memory_id=source.memory_id)), 1,
+        )
+
+    def test_graph_expansion_is_one_hop_and_project_scoped(self) -> None:
+        source = self._record(project_id="project-imports")
+        target = self._record(project_id="project-imports")
+        other_project = self._record(project_id="project-other")
+        self.graph.sync_relationship(MemoryGraphRelationship(
+            "imports-link", "related", source, target, datetime.now(timezone.utc),
+        ))
+        self.graph.sync_relationship(MemoryGraphRelationship(
+            "other-link", "related", source, other_project, datetime.now(timezone.utc),
+        ))
+
+        candidates = self.graph.expand_memory_candidates(
+            seed_memory_ids=[source.memory_id], owner_id="user-1", session_id="chat-1",
+            project_id="project-imports", project_scope="imports", limit=4,
+        )
+
+        self.assertEqual([(item.memory_id, item.seed_memory_id) for item in candidates], [(target.memory_id, source.memory_id)])
+
+    def test_supersession_is_visible_as_history_but_not_expanded_for_retrieval(self) -> None:
+        old = self._record(project_id="project-imports", status="superseded")
+        replacement = self._record(project_id="project-imports")
+        old.superseded_by = replacement.memory_id
+        relationship = MemoryGraphRelationship(
+            "replacement-link", "superseded_by", old, replacement, datetime.now(timezone.utc),
+        )
+
+        self.graph.sync_relationship(relationship)
+
+        edges = self.graph.list_edges(owner_id="user-1", project_id="project-imports")
+        self.assertEqual(edges[0]["relationship_type"], "SUPERSEDED_BY")
+        candidates = self.graph.expand_memory_candidates(
+            seed_memory_ids=[replacement.memory_id], owner_id="user-1", session_id="chat-1",
+            project_id="project-imports", project_scope="imports",
+        )
+        self.assertEqual(candidates, [])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from core.memory.models import EventMemory, IdentifierReference, MemoryRecord
 from core.memory.planner import build_memory_context, extract_identifier_references
+from core.memory.graph_projection import GraphMemoryCandidate
 from core.storage.memory_store import MemoryStore
 
 
@@ -101,6 +102,64 @@ class MemoryContextPlannerTests(unittest.TestCase):
         ))
         self.assertEqual(result.planner_status, "no_selection")
         self.assertEqual(result.memories, [])
+
+    def test_graph_candidate_requires_planner_selection(self) -> None:
+        self.store.upsert(self._record("seed"))
+        self.store.upsert(self._record("connected", reference="CONNECTED-1"))
+
+        class Graph:
+            def expand_memory_candidates(self, **_kwargs):
+                return [GraphMemoryCandidate("connected", "seed", "relationship-1", "related")]
+
+        result = asyncio.run(build_memory_context(
+            query="EK420 has moved", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store, graph=Graph(),
+            graph_expansion_enabled=True, semantic_retriever=self._semantic(),
+            planner_provider=_Planner({"selected_memory_ids": [], "relationships": []}),
+        ))
+
+        self.assertEqual(result.graph_status, "expanded")
+        self.assertEqual(result.candidate_counts["graph_related"], 1)
+        self.assertEqual(result.memories, [])
+
+    def test_selected_graph_candidate_is_rehydrated_and_has_provenance(self) -> None:
+        self.store.upsert(self._record("seed"))
+        self.store.upsert(self._record("connected", reference="CONNECTED-1"))
+
+        class Graph:
+            def expand_memory_candidates(self, **_kwargs):
+                return [GraphMemoryCandidate("connected", "seed", "relationship-1", "related")]
+
+        result = asyncio.run(build_memory_context(
+            query="EK420 has moved", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store, graph=Graph(),
+            graph_expansion_enabled=True, semantic_retriever=self._semantic(),
+            planner_provider=_Planner({
+                "selected_memory_ids": ["connected"],
+                "relationships": [{"memory_id": "connected", "relation": "related", "confidence": 0.9}],
+            }),
+        ))
+
+        self.assertEqual(result.memories[0]["candidate_source"], "graph_related")
+        self.assertEqual(result.memories[0]["graph_seed_memory_id"], "seed")
+        self.assertEqual(result.memories[0]["graph_relationship_type"], "related")
+
+    def test_unavailable_graph_does_not_remove_exact_context(self) -> None:
+        self.store.upsert(self._record("exact"))
+
+        class BrokenGraph:
+            def expand_memory_candidates(self, **_kwargs):
+                raise OSError("graph unavailable")
+
+        result = asyncio.run(build_memory_context(
+            query="EK420 has moved", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store, graph=BrokenGraph(),
+            graph_expansion_enabled=True, semantic_retriever=self._semantic(),
+            planner_provider=_Planner({"selected_memory_ids": ["exact"], "relationships": []}),
+        ))
+
+        self.assertEqual(result.graph_status, "unavailable")
+        self.assertEqual([memory["memory_id"] for memory in result.memories], ["exact"])
 
 
 if __name__ == "__main__":

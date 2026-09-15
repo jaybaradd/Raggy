@@ -138,22 +138,24 @@ async function loadBrowserMemories() {
 async function showMemoryDetail(memoryId) {
   memoryBrowserDetail.innerHTML = '<p>Loading memory details…</p>';
   try {
-    const [memoryRes, auditRes, accessRes] = await Promise.all([
+    const [memoryRes, auditRes, accessRes, relationshipsRes] = await Promise.all([
       fetch(`${API}/api/memories/${memoryId}`),
       fetch(`${API}/api/memories/${memoryId}/audit`),
       fetch(`${API}/api/memories/${memoryId}/access-events`),
+      fetch(`${API}/api/memories/${memoryId}/relationships`),
     ]);
     if (!memoryRes.ok) throw new Error('Memory is unavailable');
     const memory = await memoryRes.json();
     const audit = auditRes.ok ? (await auditRes.json()).events || [] : [];
     const access = accessRes.ok ? (await accessRes.json()).events || [] : [];
-    renderMemoryDetail(memory, audit, access);
+    const relationships = relationshipsRes.ok ? (await relationshipsRes.json()).relationships || [] : [];
+    renderMemoryDetail(memory, audit, access, relationships);
   } catch (err) {
     memoryBrowserDetail.innerHTML = `<p>Could not load details: ${err.message}</p>`;
   }
 }
 
-function renderMemoryDetail(memory, audit, access) {
+function renderMemoryDetail(memory, audit, access, relationships) {
   memoryBrowserDetail.innerHTML = '';
   const title = document.createElement('h3');
   title.textContent = `${memory.kind} · ${memory.status}`;
@@ -178,7 +180,17 @@ function renderMemoryDetail(memory, audit, access) {
   const usage = document.createElement('p');
   usage.className = 'memory-detail-usage';
   usage.textContent = `Retrieved/injected ${access.length} time${access.length === 1 ? '' : 's'}.`;
-  memoryBrowserDetail.append(title, metadata, payload, actions, timeline, usage);
+  const links = document.createElement('div');
+  links.className = 'memory-detail-timeline';
+  links.innerHTML = '<h4>Relationships</h4>';
+  if (!relationships.length) links.append(Object.assign(document.createElement('p'), { textContent: 'No durable relationships.' }));
+  relationships.forEach(link => {
+    const item = document.createElement('p');
+    const label = link.relationship_type === 'superseded_by' ? 'Superseded by' : link.relationship_type;
+    item.textContent = `${label} · ${link.peer_memory_id} · ${link.source || 'system'}`;
+    links.appendChild(item);
+  });
+  memoryBrowserDetail.append(title, metadata, payload, actions, links, timeline, usage);
 }
 
 function addMemoryActions(actions, memory) {

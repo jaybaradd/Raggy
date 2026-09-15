@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from core.memory.models import IdentifierReference, MemoryRecord
 from core.memory.projection import memory_text
 from core.retrieval.memory_scope import is_memory_record_eligible
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,18 @@ class MemoryContextResult:
     planner_status: Literal["selected", "no_selection", "exact_fallback", "unavailable"]
     rationale: str | None = None
     reconciliation_hints: list[dict] | None = None
+    graph_status: Literal["disabled", "no_seeds", "no_candidates", "expanded", "unavailable"] = "disabled"
+    candidate_counts: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
 class _Candidate:
     record: MemoryRecord
-    source: Literal["exact_identifier", "semantic"]
+    source: Literal["exact_identifier", "semantic", "graph_related"]
     score: float | None = None
+    graph_seed_memory_id: str | None = None
+    graph_relationship_id: str | None = None
+    graph_relationship_type: str | None = None
 
 
 def extract_identifier_references(text: str) -> list[IdentifierReference]:
@@ -98,6 +104,9 @@ def _candidate_payload(candidate: _Candidate) -> dict:
         "confidence": record.confidence,
         "score": candidate.score,
         "candidate_source": candidate.source,
+        "graph_seed_memory_id": candidate.graph_seed_memory_id,
+        "graph_relationship_id": candidate.graph_relationship_id,
+        "graph_relationship_type": candidate.graph_relationship_type,
     }
 
 
@@ -161,7 +170,8 @@ def _planning_prompt(query: str, candidates: list[_Candidate]) -> str:
         record = candidate.record
         candidate_lines.append(
             f"- id={record.memory_id}; source={candidate.source}; scope={record.scope}; "
-            f"confidence={record.confidence:.2f}; text={memory_text(record)}"
+            f"confidence={record.confidence:.2f}; graph_relation={candidate.graph_relationship_type}; "
+            f"connected_to={candidate.graph_seed_memory_id}; text={memory_text(record)}"
         )
     return f"""You are selecting durable memory context for one user turn.
 Select only candidates that directly help answer the current turn. Do not treat a
@@ -190,11 +200,17 @@ async def build_memory_context(
     store: Any | None = None,
     planner_provider: Any | None = None,
     semantic_retriever: Callable[..., Any] | None = None,
+    graph: Any | None = None,
+    graph_expansion_enabled: bool | None = None,
+    graph_expansion_limit: int | None = None,
 ) -> MemoryContextResult:
     """Build bounded, provenance-rich memory context before answering a turn."""
     if store is None:
         from db.repository_factory import repositories
         store = repositories.memories
+    if graph is None:
+        from db.repository_factory import repositories
+        graph = repositories.graph
     if planner_provider is None:
         from core.llm.gemini import gemini_provider
         planner_provider = gemini_provider
@@ -233,8 +249,47 @@ async def build_memory_context(
     except Exception:
         logger.exception("Semantic memory candidate retrieval failed")
 
+    expansion_enabled = settings.graph_memory_expansion_enabled if graph_expansion_enabled is None else graph_expansion_enabled
+    expansion_limit = settings.graph_memory_expansion_limit if graph_expansion_limit is None else graph_expansion_limit
+    graph_status: Literal["disabled", "no_seeds", "no_candidates", "expanded", "unavailable"] = "disabled"
+    seed_ids = list(candidate_ids)
+    if expansion_enabled and not seed_ids:
+        graph_status = "no_seeds"
+    elif expansion_enabled:
+        try:
+            graph_candidates = graph.expand_memory_candidates(
+                seed_memory_ids=seed_ids, owner_id=owner_id, session_id=session_id,
+                project_id=project_id, project_scope=project_scope, limit=expansion_limit,
+            )
+            for graph_candidate in graph_candidates:
+                memory_id = graph_candidate.memory_id
+                if memory_id in candidate_ids:
+                    continue
+                record = store.get_owned(memory_id, owner_id=owner_id)
+                if record is None or not is_memory_record_eligible(
+                    record, owner_id=owner_id, session_id=session_id,
+                    project_id=project_id, project_scope=project_scope,
+                ):
+                    continue
+                candidates.append(_Candidate(
+                    record, "graph_related", graph_seed_memory_id=graph_candidate.seed_memory_id,
+                    graph_relationship_id=graph_candidate.relationship_id,
+                    graph_relationship_type=graph_candidate.relationship_type,
+                ))
+                candidate_ids.add(memory_id)
+            graph_status = "expanded" if any(candidate.source == "graph_related" for candidate in candidates) else "no_candidates"
+        except Exception:
+            logger.exception("Graph memory candidate expansion failed")
+            graph_status = "unavailable"
+
     if not candidates:
-        return MemoryContextResult("", [], "no_selection")
+        return MemoryContextResult("", [], "no_selection", graph_status=graph_status,
+                                   candidate_counts={"exact_identifier": 0, "semantic": 0, "graph_related": 0})
+
+    candidate_counts = {
+        source: sum(candidate.source == source for candidate in candidates)
+        for source in ("exact_identifier", "semantic", "graph_related")
+    }
 
     try:
         raw_plan = await planner_provider.generate_json(
@@ -242,7 +297,9 @@ async def build_memory_context(
         )
         plan = MemoryPlan.model_validate(raw_plan)
         _validate_plan(plan, candidates)
-        return _render_selected(candidates, plan)
+        result = _render_selected(candidates, plan)
+        return MemoryContextResult(**{**result.__dict__, "graph_status": graph_status, "candidate_counts": candidate_counts})
     except Exception as error:
         logger.warning("Memory context planner failed; using exact-match fallback: %s", error)
-        return _render_selected(candidates, None, fallback=True)
+        result = _render_selected(candidates, None, fallback=True)
+        return MemoryContextResult(**{**result.__dict__, "graph_status": graph_status, "candidate_counts": candidate_counts})

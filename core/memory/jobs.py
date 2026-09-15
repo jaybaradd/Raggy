@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from core.memory.extractor import MemoryExtractor
+from core.memory.context_association import associate_selected_context
 from core.memory.identity import event_differences
 from core.memory.models import MemoryRecord
 from core.memory.policy import decide_project_capture
@@ -14,6 +15,7 @@ from core.memory.reconciliation import (MemoryReconciler, ReconciliationDecision
 from core.memory.projections import sync_pending_projections
 from core.retrieval.memory_scope import is_memory_record_eligible
 from core.storage.memory_store import MemoryStore
+from db.repositories import GraphRepository
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ async def extract_turn_memories(
     assistant_content: str,
     evidence_refs: list[str],
     reconciliation_hints: list[dict] | None = None,
+    graph: GraphRepository,
 ) -> int:
     """Extract and persist candidates once for a turn/version pair."""
     if not store.claim_extraction(source_turn_id, extractor.version):
@@ -75,7 +78,7 @@ async def extract_turn_memories(
                              details={"policy_reason": decision.reason})
         # Projection jobs make active project records searchable and graph
         # compatible, while candidates remain deliberately absent from both.
-        await asyncio.to_thread(sync_pending_projections, store=store)
+        await asyncio.to_thread(sync_pending_projections, store=store, graph=graph)
         store.complete_extraction(source_turn_id, extractor.version, status="completed")
         return len(batch.candidates)
     except Exception as exc:
@@ -141,29 +144,25 @@ async def _reconcile_event(*, store, record: MemoryRecord, provider, policy_reas
 
 def _selected_context_update(record: MemoryRecord, candidates: list[ReconciliationCandidate],
                              context_hints: dict[str, dict]) -> ReconciliationDecision | None:
-    """Convert one already-approved contextual update into a review conflict.
+    """Convert one associated contextual update into a review conflict.
 
-    The pre-response planner has already selected this exact scoped memory for
-    the current turn and declared it an update. Requiring another model call
-    would add failure risk without adding authority; the repository still
-    requires user review before it changes the old active fact.
+    The pre-response planner has already selected scoped memory context for
+    the current turn and declared it an update. A unique subject association
+    maps this extracted event to one of those selections without another model
+    call; the repository still requires user review before changing the old
+    active fact.
     """
-    matches = [
-        candidate for candidate in candidates
-        if candidate.source == "injected_context"
-        and context_hints.get(candidate.record.memory_id, {}).get("selection_relation") == "updates"
-        and float(context_hints[candidate.record.memory_id].get("selection_confidence") or 0.0) >= 0.90
-    ]
-    if len(matches) != 1:
+    association = associate_selected_context(
+        incoming=record, candidates=candidates, context_hints=context_hints,
+    )
+    if association is None:
         return None
-    existing = matches[0].record
+    existing = association.record
     changed_claims = event_differences(existing, record)
     if not changed_claims:
         return None
-    hint = context_hints[existing.memory_id]
     return ReconciliationDecision(
         outcome="update", existing_memory_id=existing.memory_id,
         changed_claims=changed_claims,
-        confidence=float(hint["selection_confidence"]),
-        reason="High-confidence selected memory context identified this turn as an update.",
+        confidence=association.confidence, reason=association.reason,
     )

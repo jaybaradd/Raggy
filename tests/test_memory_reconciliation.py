@@ -112,6 +112,24 @@ class MemoryReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(self.store.get("uncertain").status, "candidate")
 
+    def test_accepted_update_creates_audited_supersession_link(self) -> None:
+        existing = self._event("old", identifier="MTG-88", event_type="meeting", claim=("time", "4pm"))
+        incoming = self._event("new", identifier="MTG-88", event_type="meeting update", claim=("time", "12pm"))
+        self.store.upsert(existing)
+        conflict = self.store.apply_event_reconciliation(
+            incoming, outcome="update", existing_memory_id=existing.memory_id,
+            details={"changed_claims": {"time": {"existing": "4pm", "incoming": "12pm"}}}, actor_id="owner-a",
+        )
+
+        self.store.resolve_conflict(conflict.conflict_id or 0, action="supersede_existing", actor_id="owner-a")
+
+        self.assertEqual(self.store.get("old").status, "superseded")
+        relationships = self.store.list_relationships("old", owner_id="owner-a")
+        self.assertEqual(relationships[0]["relationship_type"], "superseded_by")
+        self.assertEqual(relationships[0]["peer_memory_id"], "new")
+        self.assertEqual(relationships[0]["source"], "conflict_resolution")
+        self.assertEqual(relationships[0]["conflict_id"], conflict.conflict_id)
+
     def test_invalid_reconciler_selection_is_rejected_and_job_fallback_is_safe(self) -> None:
         existing = self._event("existing", identifier="EK420", event_type="arrival", claim=("time", "Tuesday"))
         incoming = self._event("incoming", identifier="EK420", event_type="delay", claim=("time", "Thursday"))
@@ -156,6 +174,65 @@ class MemoryReconciliationTests(unittest.TestCase):
         self.assertEqual(self.store.get("meeting-new").status, "candidate")
         conflicts = self.store.list_conflicts(owner_id="owner-a")
         self.assertEqual(conflicts[0]["existing_memory_id"], "meeting-old")
+
+    def test_two_contextual_updates_in_one_turn_open_two_independent_conflicts(self) -> None:
+        appointment = self._event("appointment-old", identifier="APPOINTMENT-1", event_type="appointment",
+                                  claim=("time", "12 PM"))
+        appointment.payload.identifier_references = []
+        appointment.payload.entities = ["doctor"]
+        meeting = self._event("meeting-old", identifier="MEETING-1", event_type="meeting",
+                              claim=("time", "4 PM"))
+        meeting.payload.identifier_references = []
+        meeting.payload.entities = ["manager"]
+        cancelled = self._event("appointment-cancelled", identifier="APPOINTMENT-2", event_type="appointment cancellation",
+                                claim=("status", "cancelled"))
+        cancelled.payload.identifier_references = []
+        cancelled.payload.entities = ["doctor's appointment", "receptionist"]
+        rescheduled = self._event("meeting-rescheduled", identifier="MEETING-2", event_type="meeting reschedule",
+                                  claim=("new_time", "12 PM"))
+        rescheduled.payload.identifier_references = []
+        rescheduled.payload.entities = ["meeting", "manager"]
+        self.store.upsert(appointment)
+        self.store.upsert(meeting)
+        hints = [
+            {"memory_id": appointment.memory_id, "selection_relation": "updates", "selection_confidence": 0.98},
+            {"memory_id": meeting.memory_id, "selection_relation": "updates", "selection_confidence": 0.98},
+        ]
+        offline = _Provider(RuntimeError("second planner must not be needed"))
+
+        asyncio.run(_reconcile_event(
+            store=self.store, record=cancelled, provider=offline, policy_reason="test", reconciliation_hints=hints,
+        ))
+        asyncio.run(_reconcile_event(
+            store=self.store, record=rescheduled, provider=offline, policy_reason="test", reconciliation_hints=hints,
+        ))
+
+        conflicts = self.store.list_conflicts(owner_id="owner-a")
+        self.assertEqual({(item["incoming_memory_id"], item["existing_memory_id"]) for item in conflicts}, {
+            (cancelled.memory_id, appointment.memory_id),
+            (rescheduled.memory_id, meeting.memory_id),
+        })
+
+    def test_shared_time_without_subject_overlap_stays_reviewable(self) -> None:
+        first = self._event("first", identifier="FIRST-1", event_type="appointment", claim=("time", "12 PM"))
+        second = self._event("second", identifier="SECOND-1", event_type="meeting", claim=("time", "12 PM"))
+        incoming = self._event("incoming", identifier="INCOMING-1", event_type="status", claim=("time", "12 PM"))
+        for record, entities in ((first, ["alex"]), (second, ["sam"]), (incoming, ["unknown"])):
+            record.payload.identifier_references = []
+            record.payload.entities = entities
+        self.store.upsert(first)
+        self.store.upsert(second)
+
+        asyncio.run(_reconcile_event(
+            store=self.store, record=incoming, provider=_Provider(RuntimeError("offline")), policy_reason="test",
+            reconciliation_hints=[
+                {"memory_id": first.memory_id, "selection_relation": "updates", "selection_confidence": 0.98},
+                {"memory_id": second.memory_id, "selection_relation": "updates", "selection_confidence": 0.98},
+            ],
+        ))
+
+        self.assertEqual(self.store.get(incoming.memory_id).status, "candidate")
+        self.assertEqual(self.store.list_conflicts(owner_id="owner-a"), [])
 
     def test_low_confidence_implicit_update_becomes_reviewable_uncertain_record(self) -> None:
         existing = self._event("meeting-old", identifier="MEETING-1", event_type="meeting",

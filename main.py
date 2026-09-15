@@ -32,10 +32,6 @@ from core.memory.projections import sync_pending_projections
 from core.storage.qdrant_store import qdrant_store
 from db.repository_factory import repositories
 
-memory_store = repositories.memories
-session_store = repositories.sessions
-evidence_store = repositories.evidence
-
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -47,13 +43,27 @@ logger = logging.getLogger(__name__)
 # ── Application ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Resolve optional Falkor connectivity here, where a failed dependency is a
+    # clear startup failure instead of an import-time surprise.
+    selected_repositories = repositories.get()
+    logger.info(
+        "Repository runtime selected: authority=%s graph=%s graph_name=%s",
+        _settings.authoritative_db_backend,
+        _settings.graph_projection_backend,
+        _settings.falkordb_graph_name if _settings.graph_projection_backend == "falkor" else "n/a",
+    )
+    memory_store = selected_repositories.memories
+    session_store = selected_repositories.sessions
+    evidence_store = selected_repositories.evidence
     result = memory_store.backfill_project_ids(session_store.project_name_mapping())
     if result["updated"] or result["unmatched"]:
         logger.info("Project memory backfill: %s", result)
     # Bounded repair closes the normal migration/write path without making a
     # full rebuild part of application startup.
     try:
-        projection_result = await asyncio.to_thread(sync_pending_projections, store=memory_store, limit=100)
+        projection_result = await asyncio.to_thread(
+            sync_pending_projections, store=memory_store, graph=selected_repositories.graph, limit=100,
+        )
         if projection_result["completed"] or projection_result["failed"]:
             logger.info("Startup projection sync: %s", projection_result)
     except Exception:
@@ -67,10 +77,15 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Startup evidence projection sync failed")
     try:
-        await run_expiry_sweep()
+        await run_expiry_sweep(store=memory_store, graph=selected_repositories.graph)
     except Exception:
         logger.exception("Startup expiry sweep failed")
-    expiry_task = asyncio.create_task(expiry_sweep_loop(), name="memory-expiry-sweep")
+    expiry_task = asyncio.create_task(
+        expiry_sweep_loop(
+            run_once=lambda: run_expiry_sweep(store=memory_store, graph=selected_repositories.graph),
+        ),
+        name="memory-expiry-sweep",
+    )
     try:
         yield
     finally:

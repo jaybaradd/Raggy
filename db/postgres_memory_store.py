@@ -16,6 +16,7 @@ from core.memory.identity import (event_comparison_key, event_differences, event
                                   events_are_comparable, legacy_identifier_values)
 from core.memory.models import (EntityMemory, EventMemory, IdentifierReference, KnowledgeAtom, MemoryRecord,
                                 MemoryScope, MemoryStatus, PreferenceMemory, SolutionMemory)
+from core.memory.graph_projection import MemoryGraphRelationship, is_memory_projectable
 from db.postgres_migrations import PostgresMigrationRunner, memory_migrations
 
 
@@ -241,17 +242,69 @@ class PostgresMemoryRepository:
             self._upsert(cursor, record, event_type=event_type, actor_id=actor_id, details=details, now=now)
             if outcome == "related":
                 assert existing is not None
-                self._link(cursor, record.memory_id, existing.memory_id, "related", now)
+                self._link(cursor, record.memory_id, existing.memory_id, "related", now,
+                           source="reconciliation", created_by=actor_id)
             return EventCaptureResult("created" if outcome in {"new", "related"} else "uncertain", record)
 
     @staticmethod
     def _link(cursor: Any, first_memory_id: str, second_memory_id: str,
-              relationship_type: str, now: datetime) -> None:
+              relationship_type: str, now: datetime, *, source: str = "system",
+              conflict_id: int | None = None, created_by: str | None = None,
+              details: dict | None = None) -> None:
         if relationship_type == "related":
             first_memory_id, second_memory_id = sorted((first_memory_id, second_memory_id))
-        cursor.execute("""INSERT INTO memory_relationships(from_memory_id,to_memory_id,relationship_type,created_at)
-            VALUES (%s,%s,%s,%s) ON CONFLICT(from_memory_id,to_memory_id,relationship_type) DO NOTHING""",
-            (first_memory_id, second_memory_id, relationship_type, now))
+        cursor.execute("""INSERT INTO memory_relationships(
+            from_memory_id,to_memory_id,relationship_type,source,conflict_id,created_by,details_json,created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+            ON CONFLICT(from_memory_id,to_memory_id,relationship_type) DO NOTHING""",
+            (first_memory_id, second_memory_id, relationship_type, source, conflict_id, created_by,
+             json.dumps(details or {}, sort_keys=True), now))
+
+    def list_graph_relationships(self, *, owner_id: str,
+                                 memory_id: str | None = None) -> list[MemoryGraphRelationship]:
+        clauses: list[str] = [
+            "relationships.relationship_type IN ('related', 'contradiction', 'superseded_by')",
+            "source.owner_id=%s",
+        ]
+        params: list[Any] = [owner_id]
+        if memory_id is not None:
+            clauses.append("(relationships.from_memory_id=%s OR relationships.to_memory_id=%s)")
+            params.extend([memory_id, memory_id])
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(f"""
+                SELECT relationships.relationship_id, relationships.relationship_type,
+                       relationships.created_at AS relationship_created_at,
+                       source.*, to_jsonb(target) AS target_record
+                FROM memory_relationships relationships
+                JOIN memory_records source ON source.memory_id=relationships.from_memory_id
+                JOIN memory_records target ON target.memory_id=relationships.to_memory_id
+                WHERE {' AND '.join(clauses)} ORDER BY relationships.relationship_id
+            """, params)
+            rows = cursor.fetchall()
+        relationships: list[MemoryGraphRelationship] = []
+        for row in rows:
+            source = self._record_from_row(row)
+            target = self._record_from_row(row["target_record"])
+            relationship = MemoryGraphRelationship(
+                relationship_id=str(row["relationship_id"]), relationship_type=row["relationship_type"],
+                from_record=source, to_record=target, created_at=row["relationship_created_at"],
+            )
+            if not relationship.is_projectable:
+                continue
+            relationships.append(relationship)
+        return relationships
+
+    def list_relationships(self, memory_id: str, *, owner_id: str) -> list[dict]:
+        if not self.get_owned(memory_id, owner_id=owner_id):
+            raise KeyError(f"Memory '{memory_id}' not found")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT relationship_id, from_memory_id, to_memory_id, relationship_type,
+                source, conflict_id, created_by, details_json, created_at FROM memory_relationships
+                WHERE from_memory_id=%s OR to_memory_id=%s ORDER BY relationship_id DESC""", (memory_id, memory_id))
+            rows = cursor.fetchall()
+        return [{**dict(row), "details": row["details_json"] or {},
+                 "peer_memory_id": row["to_memory_id"] if row["from_memory_id"] == memory_id else row["from_memory_id"]}
+                for row in rows]
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -364,17 +417,24 @@ class PostgresMemoryRepository:
                              details={"expired_at": sweep_time.isoformat(), "valid_to": valid_to.isoformat() if valid_to else None}, now=sweep_time)
         return expired
 
-    def claim_projection_jobs(self, *, limit: int = 50, lease_seconds: int = 300) -> list[dict]:
+    def claim_projection_jobs(self, *, limit: int = 50, lease_seconds: int = 300,
+                              targets: set[str] | None = None) -> list[dict]:
         if not 1 <= limit <= 1000: raise ValueError("limit must be between 1 and 1000")
+        if targets is not None and (not targets or not targets <= {"qdrant", "graph"}):
+            raise ValueError("targets must contain qdrant and/or graph")
         now, stale = self._now(), self._now() - timedelta(seconds=lease_seconds)
+        target_clause, target_params = "", []
+        if targets is not None:
+            target_clause = " AND target = ANY(%s)"
+            target_params = [sorted(targets)]
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("""WITH candidates AS (
-                SELECT job_id FROM memory_projection_jobs WHERE status='pending'
-                   OR (status='running' AND locked_at < %s)
+                SELECT job_id FROM memory_projection_jobs
+                WHERE (status='pending' OR (status='running' AND locked_at < %s))""" + target_clause + """
                 ORDER BY updated_at FOR UPDATE SKIP LOCKED LIMIT %s)
                 UPDATE memory_projection_jobs jobs SET status='running', attempts=attempts+1, locked_at=%s,
-                    locked_by=%s, updated_at=%s FROM candidates WHERE jobs.job_id=candidates.job_id RETURNING jobs.*""",
-                (stale, limit, now, self._worker_id, now))
+                locked_by=%s, updated_at=%s FROM candidates WHERE jobs.job_id=candidates.job_id RETURNING jobs.*""",
+                (stale, *target_params, limit, now, self._worker_id, now))
             return [dict(row) for row in cursor.fetchall()]
 
     def complete_projection_job(self, job_id: int) -> None:
@@ -392,12 +452,15 @@ class PostgresMemoryRepository:
             cursor.execute("UPDATE memory_projection_jobs SET status='pending', error=NULL, updated_at=%s WHERE status='failed'", (self._now(),))
             return cursor.rowcount
 
-    def enqueue_all_projections(self) -> int:
+    def enqueue_all_projections(self, *, targets: tuple[str, ...] = ("qdrant", "graph")) -> int:
+        if not targets or not set(targets) <= {"qdrant", "graph"}:
+            raise ValueError("targets must contain qdrant and/or graph")
         now = self._now()
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT memory_id FROM memory_records"); ids = [row["memory_id"] for row in cursor.fetchall()]
             for memory_id in ids:
-                self._enqueue(cursor, memory_id, "qdrant", now); self._enqueue(cursor, memory_id, "graph", now)
+                for target in targets:
+                    self._enqueue(cursor, memory_id, target, now)
         return len(ids)
 
     def list_projection_jobs(self, *, owner_id: str, status: str | None = None, limit: int = 100) -> list[dict]:
@@ -452,6 +515,12 @@ class PostgresMemoryRepository:
                     existing.status, existing.valid_to = "expired", now; event = "expired"
                 self._upsert(cursor, existing, event_type=event, actor_id=actor_id,
                              details={"conflict_id": conflict_id, "replacement_memory_id": incoming.memory_id}, now=now)
+                if action == "supersede_existing":
+                    self._link(cursor, existing.memory_id, incoming.memory_id, "superseded_by", now,
+                               source="conflict_resolution", conflict_id=conflict_id, created_by=actor_id,
+                               details={"replacement_memory_id": incoming.memory_id})
+                    self._audit(cursor, incoming.memory_id, "replacement_linked", actor_id,
+                                {"replaces_memory_id": existing.memory_id, "conflict_id": conflict_id}, now)
             resolution = {"action": action, "incoming_memory_id": incoming.memory_id, "existing_memory_id": existing.memory_id}
             cursor.execute("""UPDATE memory_conflicts SET status='resolved', resolved_by=%s, resolution_json=%s::jsonb, resolved_at=%s
                 WHERE conflict_id=%s""", (actor_id, json.dumps(resolution, sort_keys=True), now, conflict_id))
@@ -523,8 +592,12 @@ class PostgresMemoryRepository:
             record, replacement = records[memory_id], records[replacement_id]
             record.status, record.superseded_by = "superseded", replacement.memory_id
             self._upsert(cursor, record, event_type="superseded", actor_id=actor_id,
-                         details={"replacement_memory_id": replacement.memory_id, "relationship": "contradiction"}, now=now)
-            self._link(cursor, record.memory_id, replacement.memory_id, "contradiction", now)
+                         details={"replacement_memory_id": replacement.memory_id, "relationship": "superseded_by"}, now=now)
+            self._link(cursor, record.memory_id, replacement.memory_id, "superseded_by", now,
+                       source="manual_supersede", created_by=actor_id,
+                       details={"replacement_memory_id": replacement.memory_id})
+            self._audit(cursor, replacement.memory_id, "replacement_linked", actor_id,
+                        {"replaces_memory_id": record.memory_id}, now)
         return record
 
     def backfill_project_ids(self, projects: dict[tuple[str, str], dict]) -> dict[str, int]:

@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     metadata_db_path: str = Field(default="./raggy_metadata.sqlite3", alias="METADATA_DB_PATH")
     memory_db_path: str = Field(default="./raggy_memory.sqlite3", alias="MEMORY_DB_PATH")
     graph_db_path: str = Field(default="./raggy_graph_projection.sqlite3", alias="GRAPH_DB_PATH")
+    graph_projection_backend: Literal["sqlite", "falkor"] = Field(
+        default="sqlite", alias="GRAPH_PROJECTION_BACKEND"
+    )
+    falkordb_url: str = Field(default="redis://127.0.0.1:6380", alias="FALKORDB_URL")
+    falkordb_graph_name: str = Field(
+        default="raggy_memory_projection_v1", alias="FALKORDB_GRAPH_NAME"
+    )
+    graph_memory_expansion_enabled: bool = Field(
+        default=False, alias="GRAPH_MEMORY_EXPANSION_ENABLED"
+    )
+    graph_memory_expansion_limit: int = Field(
+        default=4, ge=1, le=10, alias="GRAPH_MEMORY_EXPANSION_LIMIT"
+    )
     memory_expiry_sweep_interval_seconds: int = Field(
         default=300, ge=30, alias="MEMORY_EXPIRY_SWEEP_INTERVAL_SECONDS"
     )
