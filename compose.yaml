@@ -1,13 +1,46 @@
 services:
+  raggy-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      AUTHORITATIVE_DB_BACKEND: postgres
+      POSTGRES_DATABASE_URL: postgresql://raggy:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/raggy
+      POSTGRES_SCHEMA: public
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: raggy_postgres_evidence
+      MEMORY_COLLECTION: raggy_postgres_memories
+      GRAPH_PROJECTION_BACKEND: falkor
+      FALKORDB_URL: redis://falkordb:6379
+      FALKORDB_GRAPH_NAME: raggy_memory_projection_v1
+      UPLOAD_DIR: /data/uploads
+      HF_HOME: /models/huggingface
+      XDG_CACHE_HOME: /models/cache
+      FASTEMBED_CACHE_PATH: /models/fastembed
+    ports:
+      - "127.0.0.1:${RAGGY_APP_PORT:-8000}:8000"
+    volumes:
+      - raggy-uploads:/data/uploads
+      - raggy-model-cache:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:17.11-bookworm
-    profiles: ["postgres"]
     environment:
       POSTGRES_USER: raggy
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: raggy
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - raggy-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -16,14 +49,20 @@ services:
       timeout: 5s
       retries: 12
 
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - raggy-qdrant-data:/qdrant/storage
+
   falkordb:
     image: falkordb/falkordb:v4.20.4
-    profiles: ["falkor"]
+    environment:
+      REDIS_ARGS: "--appendonly yes"
     ports:
       - "127.0.0.1:${FALKORDB_PORT:-6380}:6379"
       - "127.0.0.1:${FALKORDB_BROWSER_PORT:-3001}:3000"
-    environment:
-      REDIS_ARGS: "--appendonly yes"
     volumes:
       - raggy-falkordb-data:/data
     healthcheck:
@@ -34,4 +73,7 @@ services:
 
 volumes:
   raggy-postgres-data:
+  raggy-qdrant-data:
   raggy-falkordb-data:
+  raggy-uploads:
+  raggy-model-cache:

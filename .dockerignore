@@ -1,0 +1,16 @@
+.env
+.git
+.gitignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.sqlite3
+qdrant_data/
+qdrant_postgres_data/
+uploaded_files/
+uploaded_files_postgres/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+running_thoughts.txt
+tests/

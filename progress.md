@@ -2,6 +2,14 @@
 
 ---
 
+### ✅ [2026-09-15] Containerized local stack implementation
+
+- Added a single default Podman Compose stack for the Raggy app, PostgreSQL, Qdrant, and FalkorDB. The app container uses internal service DNS (`postgres`, `qdrant`, `falkordb`) while the browser continues to use `localhost:8000`.
+- Added named volumes for authoritative Postgres data, derived Qdrant/Falkor state, uploads, and reusable local-model caches. The app runs the existing `main.py` after a small dependency-wait entrypoint.
+- Added `Dockerfile`, `.dockerignore`, and `CONTAINERS.md`. The first startup downloads local embedding/BM25 assets into the model-cache volume; later starts reuse it.
+- Initial image intentionally matches the existing host runtime and adds no unverified Linux media/GUI packages. Add a system package only if an exercised container ingestion path demonstrates it is needed.
+- The current Podman machine was unavailable while this slice was implemented, so the rendered Compose configuration and full image build remain a manual acceptance check.
+
 ### ✅ [2026-09-15] FalkorDB Phase G — Postgres development cutover
 
 - `scripts/run_postgres_dev.sh` now selects PostgreSQL authority and FalkorDB graph projection as one explicit development profile. Plain `python main.py` retains SQLite authority and the SQLite graph default.
