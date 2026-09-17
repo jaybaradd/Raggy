@@ -1,8 +1,9 @@
-"""
-core/llm/base.py — abstract interface every LLM provider must implement.
+"""Provider contract for Raggy's streamed chat and structured LLM calls.
 
-Phase 3 will add OpenAI, Anthropic, Groq providers behind this same interface.
-The rest of the application only ever touches this ABC — never a concrete class.
+Gemini is currently the production implementation.  Extraction,
+reconciliation, and memory-planning code depend on this contract, while the
+chat route still selects the configured Gemini singleton directly.  A provider
+registry will move that final selection behind this contract in Phase 3.
 """
 
 from abc import ABC, abstractmethod

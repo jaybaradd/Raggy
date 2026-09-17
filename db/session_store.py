@@ -40,7 +40,7 @@ class Session(TypedDict):
 
 
 class SessionStore:
-    """SQLite-backed session repository with a future Postgres-compatible API."""
+    """SQLite implementation of the backend-neutral session repository contract."""
 
     def __init__(self, db_path: str | None = None) -> None:
         self._path = Path(db_path or settings.session_db_path)

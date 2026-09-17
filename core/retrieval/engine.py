@@ -9,7 +9,8 @@ Pipeline (Phase 1):
   5. Return context + raw chunk metadata.
 
 Phase 0 was: embed → dense-only search → format context.
-Phase 2 will insert: memory retrieval alongside KB chunks.
+Memory retrieval is orchestrated alongside this document pipeline by the
+message route, where it can apply its independent scope and lifecycle policy.
 Phase 3 will insert: query decomposition before step 1.
 """
 
@@ -35,7 +36,8 @@ class RetrievalResult:
     ----------
     context     : Pre-formatted string ready to be stuffed into the LLM prompt.
     chunks      : Raw retrieved chunk payloads (content, score, rerank_score, page, etc.)
-                  — used by the observability panel in Phase 5.
+                  — used to build source SSE metadata and available for later
+                    observability views.
     """
 
     context: str
