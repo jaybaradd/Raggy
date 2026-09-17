@@ -35,16 +35,20 @@ def _message_router_without_runtime_services():
     engine.RAG_SYSTEM_PROMPT = "test"
     engine.RetrievalResult = lambda context, chunks: types.SimpleNamespace(context=context, chunks=chunks)
     engine.build_rag_prompt = lambda content, _context: content
-    engine.retrieve = lambda query: engine.RetrievalResult("", [])
+    async def retrieve_with_decomposition(query, provider):
+        del query, provider
+        return engine.RetrievalResult("", [])
+    engine.retrieve_with_decomposition = retrieve_with_decomposition
     memory_result = types.SimpleNamespace(
         context="", memories=[], planner_status="no_selection", rationale=None, reconciliation_hints=[],
+        graph_status="disabled", candidate_counts={},
     )
     retrieval_memory = types.ModuleType("core.retrieval.memory")
     async def build_memory_context(*args, **kwargs):
         return memory_result
     retrieval_memory.build_memory_context = build_memory_context
     stubs = {
-        "core.llm.gemini": types.SimpleNamespace(gemini_provider=object()),
+        "core.llm.client": types.SimpleNamespace(llm_client=object()),
         "core.memory.extractor": types.SimpleNamespace(MemoryExtractor=object),
         "core.memory.jobs": types.SimpleNamespace(extract_turn_memories=object()),
         "core.storage.memory_store": types.SimpleNamespace(memory_store=object()),

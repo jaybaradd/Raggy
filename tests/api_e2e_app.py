@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
-from core.llm.base import LLMProvider
 from main import app
 
 
-class DeterministicTestProvider(LLMProvider):
+class DeterministicTestClient:
     """No-network provider that makes the HTTP persistence test reproducible."""
 
     async def chat_stream(self, messages: list[dict], system_prompt: str | None = None) -> AsyncIterator[str]:
@@ -23,5 +22,4 @@ class DeterministicTestProvider(LLMProvider):
 # The router resolves this module variable when each request streams, so the
 # replacement happens before the server accepts its first request.
 from api.routers import messages as message_router
-message_router.gemini_provider = DeterministicTestProvider()
-
+message_router.llm_client = DeterministicTestClient()

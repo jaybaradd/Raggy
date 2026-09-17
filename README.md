@@ -144,6 +144,8 @@ Copy `.env.example` to `.env`. At minimum configure:
 GEMINI_API_KEY=your_key_here
 POSTGRES_PASSWORD=choose_a_local_password
 GEMINI_CHAT_MODEL=gemini-3.1-flash-lite
+# Optional; empty uses gemini/GEMINI_CHAT_MODEL through LiteLLM.
+LITELLM_MODEL=
 LOCAL_EMBED_MODEL=cnmoro/snowflake-arctic-embed-m-v2.0-cpu
 LOCAL_EMBED_DIM=256
 ```
@@ -151,6 +153,9 @@ LOCAL_EMBED_DIM=256
 The Compose application service explicitly supplies its Postgres, Qdrant, and
 FalkorDB addresses. Do not put container service URLs in the host-only
 Postgres launcher configuration.
+
+LiteLLM runs in the application process; there is no LiteLLM proxy container.
+After this dependency change, rebuild the app image with `podman compose up -d --build`.
 
 To enable optional one-hop related-memory expansion:
 

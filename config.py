@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # ── LLM ──────────────────────────────────────────────────────────────────
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_chat_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_CHAT_MODEL")
+    # A LiteLLM model string. Empty keeps the existing Gemini model setting
+    # working through LiteLLM (for example, ``gemini/gemini-1.5-flash``).
+    litellm_model: str = Field(default="", alias="LITELLM_MODEL")
 
     # ── Embeddings ────────────────────────────────────────────────────────────
     local_embed_model: str = Field(
@@ -38,6 +41,12 @@ class Settings(BaseSettings):
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=15, alias="RETRIEVAL_TOP_K")
+    query_decomposition_enabled: bool = Field(
+        default=False, alias="QUERY_DECOMPOSITION_ENABLED"
+    )
+    query_decomposition_max_subqueries: int = Field(
+        default=3, ge=2, le=3, alias="QUERY_DECOMPOSITION_MAX_SUBQUERIES"
+    )
 
     # Phase 1 — hybrid retrieval + reranking
     # Number of candidates fetched from hybrid search before reranking

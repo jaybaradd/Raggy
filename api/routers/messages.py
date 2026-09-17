@@ -28,11 +28,13 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from api.schemas import SendMessageRequest
-from core.llm.gemini import gemini_provider
+from core.llm.client import llm_client
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
 from db.repository_factory import repositories
-from core.retrieval.engine import RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve
+from core.retrieval.engine import (
+    RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve_with_decomposition,
+)
 from core.retrieval.memory import build_memory_context
 memory_store = repositories.memories
 session_store = repositories.sessions
@@ -78,7 +80,9 @@ async def send_message(
     #    That content is the primary source for this turn — prepend it before retrieval results.
     inline = body.inline_context.strip()
     if body.use_knowledge_base:
-        retrieval_result = retrieve(query=body.content)
+        retrieval_result = await retrieve_with_decomposition(
+            query=body.content, provider=llm_client,
+        )
     else:
         retrieval_result = RetrievalResult(context="", chunks=[])
         logger.info("Knowledge-base retrieval disabled for query %r", body.content[:80])
@@ -99,7 +103,7 @@ async def send_message(
         project_scope=session.get("project_scope"),
         store=memory_store,
         graph=graph_store,
-        planner_provider=gemini_provider,
+        planner_provider=llm_client,
     )
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
@@ -248,7 +252,7 @@ async def _stream_response(
         # can ignore this event and continue consuming token data events.
         yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'trace_id': trace_id, 'sources': sources})}\n\n"
         yield f"event: memories\ndata: {json.dumps({'type': 'memories', 'trace_id': trace_id, 'memories': memories, 'planner': memory_planner})}\n\n"
-        async for token in gemini_provider.chat_stream(
+        async for token in llm_client.chat_stream(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,
         ):
@@ -270,7 +274,7 @@ async def _stream_response(
     evidence_refs = [source["evidence_id"] for source in sources if source.get("evidence_id")]
     asyncio.create_task(extract_turn_memories(
         store=memory_store,
-        extractor=MemoryExtractor(gemini_provider),
+        extractor=MemoryExtractor(llm_client),
         source_turn_id=assistant_turn_id,
         session_id=session_id,
         project_id=project_id,

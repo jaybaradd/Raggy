@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.llm.base import LLMProvider
+from core.llm.client import LiteLLMClient
 from core.memory.models import EventMemory, MemoryRecord
 from core.memory.projection import memory_text
 
@@ -36,7 +36,7 @@ _IMPLICIT_MATCH_CONFIDENCE = 0.90
 class MemoryReconciler:
     """Classify only a bounded, exact-identifier candidate set."""
 
-    def __init__(self, provider: LLMProvider) -> None:
+    def __init__(self, provider: LiteLLMClient) -> None:
         self.provider = provider
 
     async def reconcile(self, *, incoming: MemoryRecord,

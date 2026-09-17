@@ -212,8 +212,8 @@ async def build_memory_context(
         from db.repository_factory import repositories
         graph = repositories.graph
     if planner_provider is None:
-        from core.llm.gemini import gemini_provider
-        planner_provider = gemini_provider
+        from core.llm.client import llm_client
+        planner_provider = llm_client
     if semantic_retriever is None:
         from core.retrieval.memory import retrieve_memories
         semantic_retriever = retrieve_memories

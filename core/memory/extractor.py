@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from core.llm.base import LLMProvider
+from core.llm.client import LiteLLMClient
 from core.memory.models import EventMemory, EntityMemory, KnowledgeAtom, PreferenceMemory, SolutionMemory
 
 EXTRACTION_VERSION = "phase2b-v3"
@@ -38,7 +38,7 @@ _PAYLOAD_TYPES = {
 
 
 class MemoryExtractor:
-    def __init__(self, provider: LLMProvider, *, version: str = EXTRACTION_VERSION) -> None:
+    def __init__(self, provider: LiteLLMClient, *, version: str = EXTRACTION_VERSION) -> None:
         self.provider = provider
         self.version = version
 

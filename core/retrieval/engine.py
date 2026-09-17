@@ -11,7 +11,8 @@ Pipeline (Phase 1):
 Phase 0 was: embed → dense-only search → format context.
 Memory retrieval is orchestrated alongside this document pipeline by the
 message route, where it can apply its independent scope and lifecycle policy.
-Phase 3 will insert: query decomposition before step 1.
+Phase 3 can add a bounded decomposition pass before step 1, then globally
+reranks its merged evidence against the original question.
 """
 
 from __future__ import annotations
@@ -69,31 +70,67 @@ def retrieve(
     -------
     RetrievalResult with the formatted context string and reranked chunk list.
     """
+    candidates = _retrieve_candidates(query, top_k=top_k, doc_id_filter=doc_id_filter)
+    return _rerank_and_format(query, candidates)
+
+
+async def retrieve_with_decomposition(
+    query: str,
+    *,
+    provider: object,
+    top_k: int | None = None,
+    doc_id_filter: str | None = None,
+) -> RetrievalResult:
+    """Retrieve one or more bounded subqueries and rerank their union once."""
+    from core.retrieval.decomposition import decompose_query
+
+    subqueries = await decompose_query(query, provider)
+    candidates = _deduplicate_candidates([
+        candidate
+        for subquery in subqueries
+        for candidate in _retrieve_candidates(subquery, top_k=top_k, doc_id_filter=doc_id_filter)
+    ])
+    return _rerank_and_format(query, candidates)
+
+
+def _retrieve_candidates(
+    query: str, *, top_k: int | None = None, doc_id_filter: str | None = None,
+) -> list[dict]:
+    """Run hybrid retrieval only; callers choose the final reranking strategy."""
     clean_q = _clean_query(query)
-
-    # Step 1: Embed the query (dense)
     query_vector = embedder.encode_query(clean_q)
-
-    # Step 2: Hybrid search — dense + BM25 sparse, RRF-fused
-    candidates = qdrant_store.search_all(
+    return qdrant_store.search_all(
         query_vector=query_vector,
         query_text=clean_q,
         top_k=top_k or settings.hybrid_candidates,
         doc_id_filter=doc_id_filter,
     )
 
+
+def _deduplicate_candidates(candidates: list[dict]) -> list[dict]:
+    """Keep the first hybrid hit for each durable evidence identity."""
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        identity = str(candidate.get("evidence_id") or candidate.get("chunk_id") or "")
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(candidate)
+    return unique
+
+
+def _rerank_and_format(query: str, candidates: list[dict]) -> RetrievalResult:
     if not candidates:
-        logger.debug("No candidates found for query: %s", clean_q[:80])
+        logger.debug("No candidates found for query: %s", query[:80])
         return RetrievalResult(context="", chunks=[])
 
-    # Step 3: Rerank candidates with cross-encoder → top-N
     reranked = reranker.rerank(
-        query=clean_q,
+        query=_clean_query(query),
         chunks=candidates,
         top_n=settings.reranker_top_n,
     )
 
-    # Step 4: Format context from reranked chunks
     context_parts: list[str] = []
     for i, chunk in enumerate(reranked, start=1):
         page_label = f" (page {chunk['page']})" if chunk.get("page") else ""
@@ -116,7 +153,7 @@ def build_rag_prompt(query: str, context: str) -> str:
     """
     Combine the retrieved context and the user query into a single prompt string.
 
-    The system prompt is returned separately in GeminiProvider.chat_stream;
+    The system prompt is passed separately to the LiteLLM chat client;
     this function builds the *user turn* content only.
 
     Keeping this as a standalone function makes it easy to unit-test and easy

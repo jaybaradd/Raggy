@@ -2,6 +2,15 @@
 
 ---
 
+### ✅ [2026-09-17] Phase 3 foundation — LiteLLM SDK and bounded decomposition
+
+- Replaced the unused `LLMProvider`/Gemini inheritance seam with one concise in-process `LiteLLMClient`. It preserves the existing Gemini key and model by deriving `gemini/<GEMINI_CHAT_MODEL>` unless `LITELLM_MODEL` is set, and exposes only streamed chat plus JSON generation.
+- Chose the LiteLLM SDK rather than a LiteLLM Proxy Compose service: one local app and one Gemini key do not need a network hop or gateway configuration. A proxy becomes appropriate when several applications/providers/users need shared virtual keys, budgets, rate limiting, or observability.
+- Added an opt-in, maximum-three-subquery decomposition path for clearly compound document questions. It merges evidence by durable identity and performs one final rerank against the original question; malformed, unavailable, or disabled decomposition uses the original question unchanged.
+- Added focused unit coverage for the LiteLLM boundary and decomposition behavior. Query decomposition defaults off until real complex-query evaluation data is available.
+
+---
+
 ### ✅ [2026-09-15] Containerized local stack implementation
 
 - Added a single default Podman Compose stack for the Raggy app, PostgreSQL, Qdrant, and FalkorDB. The app container uses internal service DNS (`postgres`, `qdrant`, `falkordb`) while the browser continues to use `localhost:8000`.

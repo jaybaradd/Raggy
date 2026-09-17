@@ -13,7 +13,7 @@ This roadmap defines Raggy as a multimodal evidence, retrieval, knowledge-atom, 
 
 ## Current baseline
 
-- Phase 0 core loop is substantially implemented: FastAPI, PDF parsing, local embeddings, Qdrant, Gemini SSE chat.
+- Phase 0 core loop is substantially implemented: FastAPI, PDF parsing, local embeddings, Qdrant, and Gemini SSE chat through LiteLLM.
 - Hybrid dense/BM25 retrieval and cross-encoder reranking are substantially implemented.
 - Multimodal parser coverage is partial: image OCR/captioning, spreadsheets, video transcription, and YouTube paths exist, but complete provenance remains. Visual embeddings and video keyframe evidence are intentionally deferred as future scope. Contextual retrieval is also deferred as a later optimization.
 - Memory, knowledge atoms, web research, workflows, and observability are planned work.
@@ -25,7 +25,7 @@ This roadmap defines Raggy as a multimodal evidence, retrieval, knowledge-atom, 
 - FastAPI session CRUD and SSE streaming chat.
 - PDF ingestion with Docling.
 - Local dense embeddings and one Qdrant text collection.
-- `LLMProvider` interface with Gemini implementation.
+- Gemini-backed streaming chat and structured JSON generation.
 - Token-aware structural chunking.
 - Content-addressed immutable `Asset` records: asset ID, owner, project, filename, MIME type, storage URI, hash, and timestamps.
 - Stable `EvidenceSegment` records and provenance fields from the beginning.
@@ -233,13 +233,19 @@ Implementation order:
 
 ## Phase 3 — Multi-provider reasoning and long-context handling (weeks 11–13)
 
-- LiteLLM gateway behind the provider interface.
-- Cheap tier for extraction, classification, and normalization. Contextual prefixes remain a future optional optimization.
-- Frontier tier for synthesis and difficult atom resolution.
-- Query decomposition for complex retrieval requests.
-- RLM when evidence plus memory exceeds the active context budget.
-- Prompt caching with static instructions/tools before variable context.
-- Atom-aware synthesis distinguishing source evidence, inferred atoms, confirmed memories, and preferences.
+### Current implementation scope
+
+- Use the LiteLLM **Python SDK in-process**, with Gemini as the only configured model. Keep one concrete client for streamed chat and JSON generation; do not add a provider registry, role tiers, or a proxy container yet.
+- Preserve `GEMINI_CHAT_MODEL` by deriving `gemini/<model>` when `LITELLM_MODEL` is unset. A second provider can later be introduced through that one model setting before any routing abstraction is warranted.
+- Add bounded query decomposition only for clearly compound retrieval questions (maximum three subqueries). Merge and deduplicate candidates, then perform one final rerank against the original question.
+- Build one merged memory candidate set across the original query and its subqueries, then make exactly one constrained memory-selection call using the original user question.
+- Keep source evidence, confirmed memory, and prompt assembly separate, with deterministic context limits and safe fallbacks to the original query.
+
+### Deferred deliberately
+
+- LiteLLM Proxy/Compose service: useful for multiple applications, providers, virtual keys, centralized budgets/rate limits, and shared observability; unnecessary overhead for one local app and one Gemini key.
+- Cheap/frontier model tiers, RLM context traversal, prompt caching, and LangGraph orchestration. Revisit them once evaluation data demonstrates a concrete need.
+- Atom-aware synthesis remains a follow-on refinement after the retrieval and context path is measured.
 
 ### Exit criteria
 
