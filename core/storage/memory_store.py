@@ -201,6 +201,17 @@ class MemoryStore:
                  rank, score, json.dumps(details or {}, sort_keys=True), datetime.now(timezone.utc).isoformat()),
             )
 
+    def list_injected_memory_ids(self, *, trace_id: str, session_id: str) -> list[str]:
+        """Return real memory IDs injected for one response trace, in prompt order."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """SELECT memory_id FROM memory_access_events
+                   WHERE trace_id = ? AND session_id = ? AND event_type = 'injected'
+                   ORDER BY rank ASC, access_event_id ASC""",
+                (trace_id, session_id),
+            ).fetchall()
+        return list(dict.fromkeys(str(row["memory_id"]) for row in rows))
+
     def claim_extraction(self, source_turn_id: str, extraction_version: str) -> bool:
         """Claim a turn/version, allowing failed jobs to be retried safely."""
         now = datetime.now(timezone.utc).isoformat()

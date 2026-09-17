@@ -9,6 +9,13 @@
 - Added an opt-in, maximum-three-subquery decomposition path for clearly compound document questions. It merges evidence by durable identity and performs one final rerank against the original question; malformed, unavailable, or disabled decomposition uses the original question unchanged.
 - Added focused unit coverage for the LiteLLM boundary and decomposition behavior. Query decomposition defaults off until real complex-query evaluation data is available.
 
+### ✅ [2026-09-17] Reliable conversational event-update targeting
+
+- Added a trace-backed update resolver that runs before ordinary memory retrieval. It follows the immediately preceding assistant reply's `trace_id` to its `memory_access_events` rows and uses real `memory_id` values, never the per-response `M1` display label.
+- The resolver rehydrates and scope-validates one active confirmed event, retains up to ten recent messages only as non-factual reference, and makes a generic constrained `update`/`not_update`/`ambiguous` decision against that event. Multiple eligible prior-response events remain ambiguous.
+- Targeted extraction must preserve an event's subject and change one of its existing claim attributes; unrelated generic events are rejected. A valid target update becomes an existing review conflict instead of silently replacing the old record.
+- A resolved update replaces ordinary memory retrieval for that turn, so a semantically retrieved but unrelated event cannot reach the answer or extraction prompt. The answer describes the change as pending confirmation; ambiguous decisions ask a concise clarification instead of claiming a memory was changed.
+
 ---
 
 ### ✅ [2026-09-15] Containerized local stack implementation

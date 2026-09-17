@@ -175,6 +175,25 @@ class MemoryReconciliationTests(unittest.TestCase):
         conflicts = self.store.list_conflicts(owner_id="owner-a")
         self.assertEqual(conflicts[0]["existing_memory_id"], "meeting-old")
 
+    def test_trace_resolved_target_creates_a_review_conflict_without_identifier(self) -> None:
+        flight = self._event("flight-old", identifier="FLIGHT-1", event_type="flight departure",
+                             claim=("departure_time", "19:00"))
+        incoming = self._event("flight-new", identifier="FLIGHT-2", event_type="flight departure",
+                               claim=("departure_time", "19:40"))
+        for record in (flight, incoming):
+            record.payload.identifier_references = []
+            record.payload.entities = ["flight"]
+        self.store.upsert(flight)
+
+        asyncio.run(_reconcile_event(
+            store=self.store, record=incoming, provider=_Provider(RuntimeError("not needed")),
+            policy_reason="trace-resolved", update_target=flight,
+        ))
+
+        conflict = self.store.list_conflicts(owner_id="owner-a")[0]
+        self.assertEqual(conflict["existing_memory_id"], "flight-old")
+        self.assertEqual(conflict["details"]["changed_claims"]["departure_time"]["incoming"], "19:40")
+
     def test_two_contextual_updates_in_one_turn_open_two_independent_conflicts(self) -> None:
         appointment = self._event("appointment-old", identifier="APPOINTMENT-1", event_type="appointment",
                                   claim=("time", "12 PM"))

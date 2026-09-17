@@ -584,9 +584,10 @@ async function loadOpenConflicts(botBubble, projectId, projectScope) {
 }
 
 function renderConflictReview(botBubble, conflict) {
-  const temporal = conflict.details?.differences?.temporal_scope;
-  const existingValue = temporal?.existing || 'the existing event';
-  const incomingValue = temporal?.incoming || 'the update';
+  const changes = conflict.details?.changed_claims || conflict.details?.differences || {};
+  const [attribute, change] = Object.entries(changes)[0] || [];
+  const existingValue = change?.existing || 'the existing event';
+  const incomingValue = change?.incoming || 'the update';
   const card = document.createElement('div');
   card.className = 'conflict-review-card';
 
@@ -595,7 +596,9 @@ function renderConflictReview(botBubble, conflict) {
   title.textContent = 'Memory update needs confirmation';
   const summary = document.createElement('div');
   summary.className = 'conflict-review-summary';
-  summary.textContent = `The existing event says ${existingValue}; your update says ${incomingValue}.`;
+  summary.textContent = attribute
+    ? `The existing ${attribute.replaceAll('_', ' ')} is ${existingValue}; your update says ${incomingValue}.`
+    : 'This proposed update needs your confirmation.';
   const actions = document.createElement('div');
   actions.className = 'conflict-review-actions';
 

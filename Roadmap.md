@@ -239,6 +239,7 @@ Implementation order:
 - Preserve `GEMINI_CHAT_MODEL` by deriving `gemini/<model>` when `LITELLM_MODEL` is unset. A second provider can later be introduced through that one model setting before any routing abstraction is warranted.
 - Add bounded query decomposition only for clearly compound retrieval questions (maximum three subqueries). Merge and deduplicate candidates, then perform one final rerank against the original question.
 - Build one merged memory candidate set across the original query and its subqueries, then make exactly one constrained memory-selection call using the original user question.
+- Resolve a possible event change before ordinary memory retrieval: constrain one generic `update`/`not_update`/`ambiguous` decision to the immediately preceding assistant response's durable trace-linked event. Use the bounded recent-chat window only as reference; an ambiguous result asks for clarification rather than guessing.
 - Keep source evidence, confirmed memory, and prompt assembly separate, with deterministic context limits and safe fallbacks to the original query.
 
 ### Deferred deliberately

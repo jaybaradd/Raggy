@@ -9,7 +9,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.llm.client import LiteLLMClient
-from core.memory.models import EventMemory, EntityMemory, KnowledgeAtom, PreferenceMemory, SolutionMemory
+from core.memory.identity import event_differences
+from core.memory.models import EventMemory, EntityMemory, KnowledgeAtom, MemoryRecord, PreferenceMemory, SolutionMemory
 
 EXTRACTION_VERSION = "phase2b-v3"
 logger = logging.getLogger(__name__)
@@ -49,10 +50,15 @@ class MemoryExtractor:
         user_content: str,
         assistant_content: str,
         evidence_refs: list[str],
+        update_target: MemoryRecord | None = None,
+        recent_messages: list[dict[str, str]] | None = None,
     ) -> ExtractionBatch:
         # Assistant wording may speculate about, summarize, or merely confirm a
         # fact. Durable chat memory is grounded in the user's turn only.
-        prompt = self._prompt(session_id, user_content, assistant_content, evidence_refs)
+        prompt = self._prompt(
+            session_id, user_content, assistant_content, evidence_refs,
+            update_target=update_target, recent_messages=recent_messages or [],
+        )
         raw = await self.provider.generate_json(prompt)
         batch = ExtractionBatch.model_validate(raw)
         validated: list[MemoryCandidate] = []
@@ -61,6 +67,9 @@ class MemoryExtractor:
                 normalized = _normalize_payload(candidate.kind, candidate.payload)
                 payload_type = _PAYLOAD_TYPES[candidate.kind]
                 payload = payload_type.model_validate(normalized)
+                if update_target is not None and not _is_valid_target_update(candidate.kind, payload, update_target):
+                    logger.warning("Skipping candidate that does not update the resolved event target")
+                    continue
                 refs = list(dict.fromkeys([*candidate.evidence_refs, *evidence_refs]))
                 validated.append(candidate.model_copy(update={"payload": payload.model_dump(mode="json"), "evidence_refs": refs}))
             except ValidationError as exc:
@@ -68,7 +77,24 @@ class MemoryExtractor:
         return ExtractionBatch(candidates=validated)
 
     @staticmethod
-    def _prompt(session_id: str, user_content: str, assistant_content: str, evidence_refs: list[str]) -> str:
+    def _prompt(session_id: str, user_content: str, assistant_content: str, evidence_refs: list[str],
+                *, update_target: MemoryRecord | None, recent_messages: list[dict[str, str]]) -> str:
+        update_section = ""
+        if update_target is not None:
+            assert isinstance(update_target.payload, EventMemory)
+            update_section = f"""
+Resolved update target (authoritative existing event):
+{update_target.payload.model_dump_json()}
+
+Recent conversation reference (resolve pronouns only; do not extract facts from it):
+{json.dumps(recent_messages)}
+
+The user may be changing the resolved target. If so, output exactly one `event`
+candidate for that same subject. Preserve its entity identity and provide the
+changed claim as an absolute value when possible. Do not create an event that
+is detached from the target's identity and claim schema. If the message does
+not actually change this target, return no candidates.
+"""
         return f"""You extract durable memory candidates from one completed conversation turn.
 
 Return JSON only. The top-level object must contain exactly one field, `candidates`.
@@ -159,7 +185,7 @@ Representative output examples (do not copy their content):
 
 Rules:
 - Extract only explicit statements or claims directly supported by the turn/evidence.
-- For conversation memory, extract only durable statements made explicitly by the USER below. The assistant response is intentionally not supplied. Questions, acknowledgements, requests for status, and requests to update memory are not operational-event assertions.
+- For conversation memory, extract only durable statements made explicitly by the USER below. Recent assistant text may appear solely to resolve a pronoun against the supplied authoritative update target; it is never a factual source. Questions, acknowledgements, requests for status, and requests to update memory are not operational-event assertions.
 - Document-derived knowledge atoms belong to the document-ingestion pipeline, not this post-chat user-memory extraction job.
 - Create one atomic subject-predicate-object claim per knowledge candidate; never put a nested resume, profile, list, or document object in a payload.
 - Use `event` only for concrete, user-stated operational events such as shipments, deliveries, meetings, deadlines, reservations, or incidents. Do not use it for a question, a rumour, or a fact found only in documents.
@@ -171,6 +197,7 @@ Rules:
 Session: {session_id}
 USER:
 {user_content}
+{update_section}
 """
 
 
@@ -210,3 +237,19 @@ def _normalize_payload(kind: str, payload: dict) -> dict:
         normalized.pop("identifier_refs", None)
         normalized.pop("event_claims", None)
     return normalized
+
+
+def _is_valid_target_update(kind: str, payload: object, target: MemoryRecord) -> bool:
+    """Require a material change in the trace-resolved event's claim schema."""
+    if kind != "event" or not isinstance(payload, EventMemory) or not isinstance(target.payload, EventMemory):
+        return False
+    # Entity extraction is optional and can be empty for perfectly valid
+    # events. The response trace has already selected the real event identity;
+    # shared claim attributes keep a detached event from becoming its update.
+    target_attributes = {claim.attribute.casefold().strip() for claim in target.payload.claims}
+    incoming_attributes = {claim.attribute.casefold().strip() for claim in payload.claims}
+    if not target_attributes.intersection(incoming_attributes):
+        return False
+    incoming = target.model_copy(deep=True)
+    incoming.payload = payload
+    return bool(event_differences(target, incoming))

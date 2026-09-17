@@ -31,6 +31,9 @@ from api.schemas import SendMessageRequest
 from core.llm.client import llm_client
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
+from core.memory.update_context import resolve_update_context
+from core.memory.planner import MemoryContextResult
+from core.memory.projection import memory_text
 from db.repository_factory import repositories
 from core.retrieval.engine import (
     RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve_with_decomposition,
@@ -74,6 +77,12 @@ async def send_message(
         attachments=[attachment.model_dump(mode="json") for attachment in body.attachments],
         trace_id=trace_id,
     )
+    history = session_store.get_messages(session_id)
+    update_context = await resolve_update_context(
+        user_content=body.content, messages=history[:-1], store=memory_store,
+        provider=llm_client, owner_id="default", session_id=session_id,
+        project_id=session.get("project_id"), project_scope=session.get("project_scope"),
+    )
 
     # 2. Build context
     #    If the user attached a file inline, its parsed text comes in as inline_context.
@@ -95,16 +104,47 @@ async def send_message(
     else:
         combined_context = retrieval_result.context
 
-    memory_result = await build_memory_context(
-        query=body.content,
-        owner_id="default",
-        session_id=session_id,
-        project_id=session.get("project_id"),
-        project_scope=session.get("project_scope"),
-        store=memory_store,
-        graph=graph_store,
-        planner_provider=llm_client,
-    )
+    # A unique event from the immediately preceding response is the only safe
+    # continuity context for the next turn.  Do not fall back to project-wide
+    # semantic retrieval and let a different event replace that referent.
+    # The update classifier controls response wording, not target identity.
+    if update_context.extraction_target is not None:
+        target = update_context.extraction_target
+        memory = {
+            "memory_id": target.memory_id,
+            "memory_text": memory_text(target),
+            "kind": target.kind,
+            "scope": target.scope,
+            "confidence": target.confidence,
+            "prompt_label": "M1",
+            "candidate_source": "previous_response",
+            "selection_source": "previous_response",
+            "selection_relation": "continuity",
+            "selection_confidence": 1.0,
+        }
+        memory_result = MemoryContextResult(
+            context=f"[M1 | {target.kind} | {target.scope}]\n{memory['memory_text']}",
+            memories=[memory], planner_status="selected",
+            rationale="Bounded to the single event used in the preceding assistant response.",
+            reconciliation_hints=[memory], candidate_counts={"previous_response": 1},
+        )
+    elif update_context.ambiguous:
+        memory_result = MemoryContextResult(
+            context="", memories=[], planner_status="no_selection",
+            rationale="Potential update target is ambiguous or unavailable.",
+            reconciliation_hints=[], candidate_counts={},
+        )
+    else:
+        memory_result = await build_memory_context(
+            query=body.content,
+            owner_id="default",
+            session_id=session_id,
+            project_id=session.get("project_id"),
+            project_scope=session.get("project_scope"),
+            store=memory_store,
+            graph=graph_store,
+            planner_provider=llm_client,
+        )
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
         combined_context = f"{combined_context}\n\n{memory_context}" if combined_context else memory_context
@@ -174,9 +214,19 @@ async def send_message(
 
     # 3. Build the augmented prompt for this turn
     augmented_query = build_rag_prompt(body.content, combined_context)
+    if update_context.target is not None:
+        augmented_query += (
+            "\n\nThe user has proposed a change to one remembered event. It is pending "
+            "review in the UI. Do not ask for conversational confirmation or claim that the "
+            "memory was updated, replaced, or confirmed."
+        )
+    elif update_context.ambiguous:
+        augmented_query += (
+            "\n\nThe user appears to be changing a remembered event, but no single target "
+            "was resolved. Ask one concise clarification question; do not guess or claim an update."
+        )
 
     # 4. Build message history for multi-turn context
-    history = session_store.get_messages(session_id)
     messages = []
     for msg in history[:-1]:   # all but the last (which we just stored)
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -221,6 +271,8 @@ async def send_message(
             reconciliation_hints=memory_result.reconciliation_hints or [],
             user_content=body.content,
             trace_id=trace_id,
+            extraction_target=update_context.extraction_target,
+            recent_messages=update_context.recent_messages,
         ),
         media_type="text/event-stream",
         headers={
@@ -241,6 +293,8 @@ async def _stream_response(
     reconciliation_hints: list[dict],
     user_content: str,
     trace_id: str,
+    extraction_target,
+    recent_messages: list[dict[str, str]],
 ):
     """
     Generator that yields SSE-formatted tokens and accumulates the full reply.
@@ -284,6 +338,10 @@ async def _stream_response(
         assistant_content=complete_reply,
         evidence_refs=evidence_refs,
         reconciliation_hints=reconciliation_hints,
+        # Constrain persistence to the trace-linked event even if reply-time
+        # classification did not recognize an indirect update assertion.
+        update_target=extraction_target,
+        recent_messages=recent_messages,
         graph=graph_store,
     ))
 

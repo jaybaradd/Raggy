@@ -33,6 +33,8 @@ async def extract_turn_memories(
     assistant_content: str,
     evidence_refs: list[str],
     reconciliation_hints: list[dict] | None = None,
+    update_target: MemoryRecord | None = None,
+    recent_messages: list[dict[str, str]] | None = None,
     graph: GraphRepository,
 ) -> int:
     """Extract and persist candidates once for a turn/version pair."""
@@ -44,6 +46,8 @@ async def extract_turn_memories(
             user_content=user_content,
             assistant_content=assistant_content,
             evidence_refs=evidence_refs,
+            update_target=update_target,
+            recent_messages=recent_messages,
         )
         for candidate in batch.candidates:
             decision = decide_project_capture(
@@ -72,6 +76,7 @@ async def extract_turn_memories(
                 await _reconcile_event(
                     store=store, record=record, provider=extractor.provider,
                     policy_reason=decision.reason, reconciliation_hints=reconciliation_hints or [],
+                    update_target=update_target,
                 )
             else:
                 store.upsert(record, event_type=decision.event_type,
@@ -88,7 +93,8 @@ async def extract_turn_memories(
 
 
 async def _reconcile_event(*, store, record: MemoryRecord, provider, policy_reason: str,
-                           reconciliation_hints: list[dict] | None = None) -> None:
+                           reconciliation_hints: list[dict] | None = None,
+                           update_target: MemoryRecord | None = None) -> None:
     """Reconcile exact identifiers plus selected context from this same turn.
 
     A failed model call is deliberately non-destructive: the event remains a
@@ -118,7 +124,13 @@ async def _reconcile_event(*, store, record: MemoryRecord, provider, policy_reas
         candidates.append(ReconciliationCandidate(context_record, "injected_context"))
         known_ids.add(memory_id)
         context_hints[memory_id] = hint
-    if not candidates:
+    if update_target is not None and event_differences(update_target, record):
+        decision = ReconciliationDecision(
+            outcome="update", existing_memory_id=update_target.memory_id,
+            changed_claims=event_differences(update_target, record), confidence=1.0,
+            reason="Single event injected for the immediately preceding assistant response.",
+        )
+    elif not candidates:
         decision = ReconciliationDecision(
             outcome="new", confidence=1.0, reason="No exact identifier candidate was available.",
         )

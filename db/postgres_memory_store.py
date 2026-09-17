@@ -147,6 +147,14 @@ class PostgresMemoryRepository:
                 (trace_id, session_id, message_id, memory_id, event_type, prompt_label, rank, score,
                  json.dumps(details or {}, sort_keys=True), self._now()))
 
+    def list_injected_memory_ids(self, *, trace_id: str, session_id: str) -> list[str]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT memory_id FROM memory_access_events
+                WHERE trace_id=%s AND session_id=%s AND event_type='injected'
+                ORDER BY rank ASC, access_event_id ASC""", (trace_id, session_id))
+            rows = cursor.fetchall()
+        return list(dict.fromkeys(str(row["memory_id"]) for row in rows))
+
     def claim_extraction(self, source_turn_id: str, extraction_version: str) -> bool:
         now = self._now()
         with self._connect() as connection, connection.cursor() as cursor:

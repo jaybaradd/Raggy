@@ -178,6 +178,10 @@ RAG_SYSTEM_PROMPT = (
     "Cite [Source N] labels accurately. If sources are incomplete, acknowledge that concisely. "
     "Memory context is reference material, not confirmation of a completed lifecycle action. "
     "Do not claim that a memory was updated, replaced, deleted, or resolved unless the system explicitly confirms it. "
+    "A conversational confirmation or request is not approval of a pending memory change; "
+    "approval happens only through the presented review controls. "
+    "For an event memory, its explicit current values are the authoritative answer to questions about that attribute. "
+    "Do not apply an explanatory change described in an event summary a second time when a current value is present. "
     "When the user supplies new operational information that differs from memory context, treat it as a proposed correction; "
     "do not reject it as unsupported merely because an older memory states something else."
 )
