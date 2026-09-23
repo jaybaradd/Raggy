@@ -27,7 +27,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from api.schemas import SendMessageRequest
+from api.schemas import MemoryExtractionStatusResponse, SendMessageRequest
 from core.llm.client import llm_client
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
@@ -45,6 +45,41 @@ graph_store = repositories.graph
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])
+
+
+@router.get("/{session_id}/memory-extractions/{source_turn_id}", response_model=MemoryExtractionStatusResponse)
+def memory_extraction_status(session_id: str, source_turn_id: str) -> MemoryExtractionStatusResponse:
+    """Expose post-turn memory work without exposing another session's turn."""
+    messages = session_store.get_messages(session_id)
+    if not any(message["message_id"] == source_turn_id and message["role"] == "assistant" for message in messages):
+        raise HTTPException(status_code=404, detail="Assistant turn not found")
+
+    status = memory_store.get_extraction_status(source_turn_id, MemoryExtractor(llm_client).version)
+    if status is None:
+        return MemoryExtractionStatusResponse(status="queued", outcome="pending", message="Checking this turn for memories.")
+    if status["status"] == "running":
+        return MemoryExtractionStatusResponse(status="running", outcome="pending", message="Checking this turn for memories.")
+    if status["status"] == "failed":
+        return MemoryExtractionStatusResponse(status="failed", outcome="failed", message="Memory processing could not finish.")
+
+    records = memory_store.list(owner_id="default", source_turn_id=source_turn_id, status=None, limit=50)
+    memory_ids = [record.memory_id for record in records]
+    open_conflicts = [
+        conflict for conflict in memory_store.list_conflicts(owner_id="default", status="open")
+        if conflict["incoming_memory_id"] in memory_ids
+    ]
+    if open_conflicts or any(record.status == "candidate" for record in records):
+        return MemoryExtractionStatusResponse(
+            status="completed", outcome="review_required", memory_ids=memory_ids,
+            conflict_ids=[int(conflict["conflict_id"]) for conflict in open_conflicts],
+            message="A memory change is ready for review.",
+        )
+    if records:
+        return MemoryExtractionStatusResponse(
+            status="completed", outcome="memory_saved", memory_ids=memory_ids,
+            message="Saved durable memory from this turn.",
+        )
+    return MemoryExtractionStatusResponse(status="completed", outcome="no_memory", message="No durable memory was created from this turn.")
 
 
 @router.post("/{session_id}/messages")
@@ -344,6 +379,8 @@ async def _stream_response(
         recent_messages=recent_messages,
         graph=graph_store,
     ))
+
+    yield f"event: memory_processing\ndata: {json.dumps({'type': 'memory_processing', 'source_turn_id': assistant_turn_id})}\n\n"
 
     # Signal end of stream
     yield "data: [DONE]\n\n"

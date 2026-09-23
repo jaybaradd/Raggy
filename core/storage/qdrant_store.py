@@ -271,7 +271,11 @@ class QdrantStore:
     def upsert_memory(self, record: MemoryRecord) -> None:
         """Upsert an active confirmed memory projection; remove ineligible records."""
         store = self._memory_store()
-        if record.status != "active" or not record.user_confirmed:
+        if (
+            record.scope not in {"session", "project"}
+            or record.status != "active"
+            or not record.user_confirmed
+        ):
             store.delete_memory(record.memory_id)
             return
         text = memory_text(record)

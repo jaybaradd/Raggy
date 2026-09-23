@@ -55,6 +55,7 @@
       <div class="upload-status" id="uploadStatus" hidden>
         <span class="upload-status-icon" id="uploadStatusIcon">⏳</span>
         <span id="uploadStatusText">Uploading…</span>
+        <button class="toast-retry" id="toastRetry" hidden>Retry</button>
         <button class="toast-close" id="toastClose">×</button>
       </div>
 
@@ -135,7 +136,7 @@
     </div>
     <div class="memory-filters">
       <select id="memoryStatusFilter"><option value="all">All statuses</option><option value="active">Active</option><option value="candidate">Candidates</option><option value="expired">Expired</option><option value="superseded">Superseded</option><option value="rejected">Rejected</option><option value="deleted">Forgotten</option></select>
-      <select id="memoryScopeFilter"><option value="">All scopes</option><option value="project">Project</option><option value="session">Session</option><option value="user">User</option></select>
+      <select id="memoryScopeFilter"><option value="">All scopes</option><option value="project">Project</option><option value="session">Session</option></select>
     </div>
     <div class="memory-browser-content">
       <div class="memory-browser-list" id="memoryBrowserList"></div>

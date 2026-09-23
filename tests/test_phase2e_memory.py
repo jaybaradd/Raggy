@@ -104,8 +104,9 @@ class Phase2EMemoryTests(unittest.TestCase):
 
     def test_extraction_policy_uses_only_the_user_turn(self) -> None:
         prompt = MemoryExtractor._prompt("session", "Remember I have a shipment coming.",
-                                         "A document says peroxisomes oxidize lipids.", ["evidence-1"])
-        self.assertIn("assistant response is intentionally not supplied", prompt)
+                                         "A document says peroxisomes oxidize lipids.", ["evidence-1"],
+                                         update_target=None, recent_messages=[])
+        self.assertIn("only durable statements made explicitly by the USER", prompt)
         self.assertIn("document-ingestion pipeline", prompt)
         self.assertNotIn("peroxisomes oxidize lipids", prompt)
 

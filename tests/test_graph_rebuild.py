@@ -29,13 +29,15 @@ class GraphRebuildTests(unittest.TestCase):
 
     def test_rebuild_replaces_graph_from_authoritative_records_only(self) -> None:
         record = MemoryRecord(
-            owner_id="owner-a", scope="user", kind="event", status="active",
+            owner_id="owner-a", scope="project", project_id="project-a", project_scope="Project A",
+            kind="event", status="active",
             user_confirmed=True, confidence=0.9,
             payload=EventMemory(event_type="meeting", summary="Meeting with manager"),
         )
         self.memories.upsert(record)
         self.graph.sync_memory(MemoryRecord(
-            owner_id="stale-owner", scope="user", kind="event", status="active",
+            owner_id="stale-owner", scope="project", project_id="stale-project", project_scope="Stale",
+            kind="event", status="active",
             user_confirmed=True, confidence=0.9,
             payload=EventMemory(event_type="stale", summary="Stale graph node"),
         ))

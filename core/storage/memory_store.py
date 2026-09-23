@@ -243,6 +243,16 @@ class MemoryStore:
                 (status, error, now, source_turn_id, extraction_version),
             )
 
+    def get_extraction_status(self, source_turn_id: str, extraction_version: str) -> dict | None:
+        """Return one durable post-turn extraction status, if work has started."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT status, error, created_at, updated_at FROM memory_extractions
+                   WHERE source_turn_id = ? AND extraction_version = ?""",
+                (source_turn_id, extraction_version),
+            ).fetchone()
+        return dict(row) if row else None
+
     def upsert(self, record: MemoryRecord, *, event_type: str = "created",
                actor_id: str | None = None, details: dict | None = None) -> None:
         now = datetime.now(timezone.utc)
@@ -723,7 +733,7 @@ class MemoryStore:
     @staticmethod
     def _candidate_scope_clause(*, session_id: str, project_id: str | None,
                                 project_scope: str | None) -> tuple[str, list[object]]:
-        clauses = ["(records.scope = 'session' AND records.session_id = ?)", "records.scope = 'user'"]
+        clauses = ["(records.scope = 'session' AND records.session_id = ?)"]
         params: list[object] = [session_id]
         if project_id:
             clauses.append("(records.scope = 'project' AND records.project_id = ?)")
@@ -812,11 +822,12 @@ class MemoryStore:
     def list(self, *, owner_id: str, scope: MemoryScope | None = None,
              session_id: str | None = None, project_id: str | None = None, project_scope: str | None = None,
              status: MemoryStatus | None = "active", kind: str | None = None,
-             limit: int = 100) -> list[MemoryRecord]:
+             source_turn_id: str | None = None, limit: int = 100) -> list[MemoryRecord]:
         clauses = ["owner_id = ?"]
         params: list[object] = [owner_id]
         for field, value in (("scope", scope), ("session_id", session_id),
-                             ("project_id", project_id), ("project_scope", project_scope), ("status", status), ("kind", kind)):
+                             ("project_id", project_id), ("project_scope", project_scope), ("status", status),
+                             ("kind", kind), ("source_turn_id", source_turn_id)):
             if value is not None:
                 clauses.append(f"{field} = ?")
                 params.append(value)
@@ -919,13 +930,13 @@ class MemoryStore:
         record = self._owned(memory_id, actor_id)
         if record.status not in {"candidate", "active"}:
             raise ValueError(f"Cannot promote a {record.status} memory")
-        if scope not in {"user", "project"}:
-            raise ValueError("Promotion target must be 'user' or 'project'")
-        if scope == "project" and not project_scope:
+        if scope != "project":
+            raise ValueError("Promotion target must be 'project'")
+        if not project_scope:
             raise ValueError("project promotion requires project_scope")
         previous_scope = record.scope
         record.scope = scope
-        record.project_scope = project_scope if scope == "project" else None
+        record.project_scope = project_scope
         record.user_confirmed = True
         record.status = "active"
         self.upsert(record, event_type="promoted", actor_id=actor_id,

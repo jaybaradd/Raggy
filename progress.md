@@ -2,6 +2,22 @@
 
 ---
 
+### ✅ [2026-09-20] Memory privacy boundary hardening
+
+- Personal chats now retrieve only memories from their own session. Project memories remain available only to chats in the matching project; no project-wide record can enter a Personal-chat prompt.
+- Retired the dormant global `user` scope from the promotion API and every retrieval path (authoritative lookup, Qdrant, and both graph adapters). Existing legacy rows remain auditable but are inert to context retrieval; future projection sync treats them as inactive.
+- Fixed the Memory Browser's Personal-chat mode: it locks to the current session rather than displaying every project memory owned by the user. The global-scope filter was removed from the UI.
+
+---
+
+### ✅ [2026-09-19] Phase 3 hardening — lifecycle visibility and ingestion retry
+
+- Added a durable assistant-turn memory-processing status API and SSE handoff. The chat now reports whether a turn saved memory, requires review, produced no durable memory, or failed processing without exposing backend error details.
+- Added a user-triggered retry endpoint and toast action for failed document and YouTube ingestion. A retry creates a fresh auditable ingestion run from the original immutable source, rejects processing/completed items, and validates local source paths remain inside the upload directory.
+- Added deterministic Phase 3 hardening coverage for extraction status lifecycle, source-turn filtering, and fresh ingestion runs after a transient failure. Existing trace-update, reconciliation, decomposition, and projection tests remain the broader regression set.
+
+---
+
 ### ✅ [2026-09-17] Phase 3 foundation — LiteLLM SDK and bounded decomposition
 
 - Replaced the unused `LLMProvider`/Gemini inheritance seam with one concise in-process `LiteLLMClient`. It preserves the existing Gemini key and model by deriving `gemini/<GEMINI_CHAT_MODEL>` unless `LITELLM_MODEL` is set, and exposes only streamed chat plus JSON generation.

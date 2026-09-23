@@ -63,6 +63,20 @@ class PostgresEvidenceRepository:
                 VALUES (%s,%s,%s,%s,%s) ON CONFLICT(asset_id,owner_id,project_id) DO NOTHING""",
                 (asset.asset_id, owner, asset.project_id, asset.project_scope, now))
 
+    def get_asset(self, asset_id: str, *, owner_id: str = "default") -> AssetRecord | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT assets.*, bindings.owner_id, bindings.project_id, bindings.project_scope
+                FROM assets JOIN asset_bindings bindings ON bindings.asset_id = assets.asset_id
+                WHERE assets.asset_id = %s AND bindings.owner_id = %s LIMIT 1""", (asset_id, owner_id))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return AssetRecord(
+            asset_id=str(row["asset_id"]), owner_id=row["owner_id"], project_id=str(row["project_id"]) if row["project_id"] else None,
+            project_scope=row["project_scope"], filename=row["filename"], media_type=row["media_type"],
+            raw_file_uri=row["raw_file_uri"], content_hash=row["content_hash"], created_at=row["created_at"],
+        )
+
     def start_ingestion(self, asset_id: str, *, modality: str, owner_id: str = "default", project_id: str | None = None,
                         project_scope: str | None = None, parser_backend: str | None = None, parser_version: str | None = None) -> dict:
         run_id, now = str(uuid.uuid4()), self._now()

@@ -172,6 +172,13 @@ class PostgresMemoryRepository:
             cursor.execute("UPDATE memory_extractions SET status=%s, error=%s, updated_at=%s WHERE source_turn_id=%s AND extraction_version=%s",
                            (status, error, self._now(), source_turn_id, extraction_version))
 
+    def get_extraction_status(self, source_turn_id: str, extraction_version: str) -> dict | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT status, error, created_at, updated_at FROM memory_extractions
+                WHERE source_turn_id=%s AND extraction_version=%s""", (source_turn_id, extraction_version))
+            row = cursor.fetchone()
+        return dict(row) if row else None
+
     def capture_event(self, record: MemoryRecord, *, event_type: str, details: dict | None = None,
                       actor_id: str | None = None) -> EventCaptureResult:
         if record.kind != "event": raise ValueError("capture_event requires an event memory")
@@ -327,7 +334,7 @@ class PostgresMemoryRepository:
     @staticmethod
     def _candidate_scope_clause(*, session_id: str, project_id: str | None,
                                 project_scope: str | None) -> tuple[str, list[Any]]:
-        clauses = ["(records.scope='session' AND records.session_id=%s)", "records.scope='user'"]
+        clauses = ["(records.scope='session' AND records.session_id=%s)"]
         params: list[Any] = [session_id]
         if project_id:
             clauses.append("(records.scope='project' AND records.project_id=%s)")
@@ -405,9 +412,9 @@ class PostgresMemoryRepository:
 
     def list(self, *, owner_id: str, scope: MemoryScope | None = None, session_id: str | None = None,
              project_id: str | None = None, project_scope: str | None = None, status: MemoryStatus | None = "active",
-             kind: str | None = None, limit: int = 100) -> list[MemoryRecord]:
+             kind: str | None = None, source_turn_id: str | None = None, limit: int = 100) -> list[MemoryRecord]:
         clauses, params = ["owner_id=%s"], [owner_id]
-        for field, value in (("scope",scope),("session_id",session_id),("project_id",project_id),("project_scope",project_scope),("status",status),("kind",kind)):
+        for field, value in (("scope",scope),("session_id",session_id),("project_id",project_id),("project_scope",project_scope),("status",status),("kind",kind),("source_turn_id",source_turn_id)):
             if value is not None: clauses.append(f"{field}=%s"); params.append(value)
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(f"SELECT * FROM memory_records WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT %s", (*params, limit))
@@ -575,13 +582,13 @@ class PostgresMemoryRepository:
         return self._mutate(memory_id, actor_id, lambda item: setattr(item, "status", "deleted"), "deleted_by_user")
 
     def promote(self, memory_id: str, *, scope: MemoryScope, project_scope: str | None = None, actor_id: str = "default") -> MemoryRecord:
-        if scope not in {"user", "project"}: raise ValueError("Promotion target must be 'user' or 'project'")
-        if scope == "project" and not project_scope: raise ValueError("project promotion requires project_scope")
+        if scope != "project": raise ValueError("Promotion target must be 'project'")
+        if not project_scope: raise ValueError("project promotion requires project_scope")
         previous = self.get_owned(memory_id, owner_id=actor_id)
         if not previous: raise KeyError(f"Memory '{memory_id}' not found")
         def mutate(record: MemoryRecord) -> None:
             if record.status not in {"candidate", "active"}: raise ValueError(f"Cannot promote a {record.status} memory")
-            record.scope, record.project_scope, record.user_confirmed, record.status = scope, project_scope if scope == "project" else None, True, "active"
+            record.scope, record.project_scope, record.user_confirmed, record.status = scope, project_scope, True, "active"
         return self._mutate(memory_id, actor_id, mutate, "promoted", {"from_scope": previous.scope, "to_scope": scope, "project_scope": project_scope})
 
     def edit(self, memory_id: str, payload: dict, *, actor_id: str = "default") -> MemoryRecord:

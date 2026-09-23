@@ -132,7 +132,7 @@ class MemoryListResponse(BaseModel):
 
 
 class MemoryPromotionRequest(BaseModel):
-    scope: Literal["user", "project"]
+    scope: Literal["project"]
     project_scope: str | None = Field(default=None, max_length=200)
     project_id: str | None = None
 
@@ -147,3 +147,11 @@ class MemorySupersedeRequest(BaseModel):
 
 class MemoryConflictResolutionRequest(BaseModel):
     action: Literal["supersede_existing", "keep_existing", "expire_existing"]
+
+
+class MemoryExtractionStatusResponse(BaseModel):
+    status: Literal["queued", "running", "completed", "failed"]
+    outcome: Literal["pending", "no_memory", "memory_saved", "review_required", "failed"]
+    memory_ids: list[str] = Field(default_factory=list)
+    conflict_ids: list[int] = Field(default_factory=list)
+    message: str = ""

@@ -218,7 +218,7 @@ def promote_memory(memory_id: str, body: MemoryPromotionRequest,
         project_id, project_scope = _project(owner_id, body.project_id, body.project_scope)
         record = memory_store.promote(memory_id, scope=body.scope, project_scope=project_scope,
                                       actor_id=_owner(owner_id))
-        record.project_id = project_id if body.scope == "project" else None
+        record.project_id = project_id
         memory_store.upsert(record, event_type="project_id_assigned", actor_id=_owner(owner_id))
         _sync_projection(record)
         return record.model_dump(mode="json")

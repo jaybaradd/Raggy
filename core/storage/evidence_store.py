@@ -130,6 +130,21 @@ class EvidenceStore:
                 ),
             )
 
+    def get_asset(self, asset_id: str, *, owner_id: str = "default") -> AssetRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM assets WHERE asset_id = ? AND (owner_id = ? OR owner_id IS NULL)",
+                (asset_id, owner_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return AssetRecord(
+            asset_id=row["asset_id"], owner_id=row["owner_id"], project_id=row["project_id"],
+            project_scope=row["project_scope"], filename=row["filename"], media_type=row["media_type"],
+            raw_file_uri=row["raw_file_uri"], content_hash=row["content_hash"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
     def upsert_evidence(self, segments: list[EvidenceSegment]) -> None:
         if not segments:
             return

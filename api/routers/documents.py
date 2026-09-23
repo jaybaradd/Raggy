@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -198,6 +199,47 @@ def document_status(doc_id: str) -> DocumentStatusResponse:
     if record is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return record
+
+
+@router.post("/{doc_id}/retry", response_model=UploadDocumentResponse, status_code=202)
+async def retry_document_ingestion(doc_id: str) -> UploadDocumentResponse:
+    """Start a new run from the immutable source of the latest failed ingestion."""
+    current = evidence_store.get_document_status(doc_id)
+    asset = evidence_store.get_asset(doc_id)
+    if current is None or asset is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current["status"] == "processing":
+        raise HTTPException(status_code=409, detail="Ingestion is already processing")
+    if current["status"] == "done":
+        raise HTTPException(status_code=409, detail="Document is already indexed")
+    if current["status"] != "failed":
+        raise HTTPException(status_code=409, detail="Document cannot be retried")
+
+    modality = current["modality"]
+    if modality == "youtube":
+        source: Path | str = asset.raw_file_uri
+    else:
+        parsed = urlparse(asset.raw_file_uri)
+        if parsed.scheme != "file":
+            raise HTTPException(status_code=422, detail="Stored source cannot be retried")
+        source = Path(unquote(parsed.path)).resolve()
+        upload_root = Path(settings.upload_dir).resolve()
+        try:
+            source.relative_to(upload_root)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Stored source is outside the upload directory") from error
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail="Stored source file is unavailable")
+
+    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, modality=modality, status="processing", chunk_count=0)
+    run = evidence_store.start_ingestion(
+        doc_id, modality=modality, project_id=asset.project_id, project_scope=asset.project_scope,
+    )
+    asyncio.create_task(_run_ingestion_job(source, doc_id, modality, asset.filename, run["run_id"]))
+    return UploadDocumentResponse(
+        doc_id=doc_id, filename=asset.filename, modality=modality, status="processing", chunk_count=0,
+        message="Ingestion retry started.",
+    )
 
 
 @router.get("/{doc_id}/source")

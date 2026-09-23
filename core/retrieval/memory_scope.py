@@ -22,10 +22,9 @@ def applicable_memory_scopes(*, owner_id: str, session_id: str,
     ``project_id`` and ``project_scope`` select *which* project records are
     visible; they are not themselves values of a record's ``scope`` field.
     """
-    constraints = [
-        MemoryScopeConstraint("session", "session_id", session_id),
-        MemoryScopeConstraint("user", None, owner_id),
-    ]
+    # ``user`` is a legacy stored scope. It remains readable for audit and
+    # migration purposes but is never eligible for prompt context.
+    constraints = [MemoryScopeConstraint("session", "session_id", session_id)]
     if project_id:
         constraints.append(MemoryScopeConstraint("project", "project_id", project_id))
     if project_scope:
@@ -49,8 +48,6 @@ def is_memory_record_eligible(record: Any, *, owner_id: str, session_id: str,
         return False
     if record.scope == "session":
         return record.session_id == session_id
-    if record.scope == "user":
-        return True
     if record.scope != "project":
         return False
     if project_id and record.project_id == project_id:

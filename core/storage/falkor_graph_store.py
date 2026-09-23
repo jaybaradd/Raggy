@@ -203,7 +203,7 @@ def _read_rows(graph: Any, query: str, params: dict[str, Any]) -> list[list[Any]
 
 def _visibility_filters(*, alias: str, session_id: str, project_id: str | None,
                         project_scope: str | None) -> tuple[list[str], dict[str, Any]]:
-    clauses = [f"({alias}.scope = 'session' AND {alias}.session_id = $session_id)", f"{alias}.scope = 'user'"]
+    clauses = [f"({alias}.scope = 'session' AND {alias}.session_id = $session_id)"]
     params: dict[str, Any] = {"session_id": session_id}
     if project_id:
         clauses.append(f"({alias}.scope = 'project' AND {alias}.project_id = $project_id)")

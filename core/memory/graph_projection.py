@@ -28,7 +28,8 @@ def is_memory_projectable(record: MemoryRecord, *, now: datetime | None = None) 
     """Return whether a memory may participate in current graph traversal."""
     current_time = now or datetime.now(timezone.utc)
     return (
-        record.status == "active"
+        record.scope in {"session", "project"}
+        and record.status == "active"
         and record.user_confirmed
         and record.valid_from <= current_time
         and (record.valid_to is None or record.valid_to > current_time)
@@ -104,8 +105,6 @@ def _same_graph_partition(first: MemoryRecord, second: MemoryRecord) -> bool:
     """
     if first.owner_id != second.owner_id or first.scope != second.scope:
         return False
-    if first.scope == "user":
-        return True
     if first.scope == "session":
         return first.session_id is not None and first.session_id == second.session_id
     if first.scope == "project":

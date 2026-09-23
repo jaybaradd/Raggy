@@ -8,6 +8,7 @@ let currentProjectId = null;
 let isStreaming = false;
 let pendingFile = null;       // File object waiting to be uploaded on send
 let detectedYtUrl = null;     // YouTube URL detected in textarea
+let retryDocumentId = null;
 const shownConflictIds = new Set();
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ const fileInput          = document.getElementById('fileInput');
 const uploadStatus       = document.getElementById('uploadStatus');
 const uploadStatusIcon   = document.getElementById('uploadStatusIcon');
 const uploadStatusText   = document.getElementById('uploadStatusText');
+const toastRetry         = document.getElementById('toastRetry');
 const toastClose         = document.getElementById('toastClose');
 const attachmentPreview  = document.getElementById('attachmentPreview');
 const attachmentName     = document.getElementById('attachmentName');
@@ -59,6 +61,7 @@ function bindEvents() {
   memoryStatusFilter.addEventListener('change', loadBrowserMemories);
   memoryScopeFilter.addEventListener('change', loadBrowserMemories);
   toastClose.addEventListener('click', () => { uploadStatus.hidden = true; });
+  toastRetry.addEventListener('click', retryIngestion);
 
   // Attachment file picker
   fileInput.addEventListener('change', () => {
@@ -97,7 +100,10 @@ function bindEvents() {
 // ── Memory browser ──────────────────────────────────────────────────────────
 async function openMemoryBrowser() {
   const project = projectScopeInput.value.trim();
-  memoryDrawerProject.textContent = project ? ` · ${project}` : ' · all memories';
+  const isPersonalChat = !currentProjectId && !project;
+  memoryDrawerProject.textContent = project ? ` · ${project}` : ' · this personal chat';
+  memoryScopeFilter.disabled = isPersonalChat;
+  if (isPersonalChat) memoryScopeFilter.value = 'session';
   memoryDrawer.hidden = false;
   memoryBrowserDetail.innerHTML = '<p>Select a memory to inspect its details and history.</p>';
   await loadBrowserMemories();
@@ -105,10 +111,16 @@ async function openMemoryBrowser() {
 
 async function loadBrowserMemories() {
   const params = new URLSearchParams({ status: memoryStatusFilter.value, limit: '100' });
-  if (memoryScopeFilter.value) params.set('scope', memoryScopeFilter.value);
   const project = projectScopeInput.value.trim();
-  if (currentProjectId) params.set('project_id', currentProjectId);
-  else if (project) params.set('project_scope', project);
+  const isPersonalChat = !currentProjectId && !project;
+  if (isPersonalChat) {
+    params.set('scope', 'session');
+    params.set('session_id', currentSessionId);
+  } else {
+    if (memoryScopeFilter.value) params.set('scope', memoryScopeFilter.value);
+    if (currentProjectId) params.set('project_id', currentProjectId);
+    else params.set('project_scope', project);
+  }
   memoryBrowserList.innerHTML = '<p class="memory-browser-empty">Loading…</p>';
   try {
     const res = await fetch(`${API}/api/memories?${params}`);
@@ -274,7 +286,7 @@ async function ingestYouTube(url) {
       ? await waitForDocument(data.doc_id, 'YouTube transcript')
       : data;
     if (status.status === 'error') {
-      showToast('❌', `Ingestion failed: ${status.message || 'Unknown error'}`);
+      showIngestionFailure(data.doc_id, `Ingestion failed: ${status.message || 'Unknown error'}`);
       return;
     }
     showToast('✅', `Ingested ${status.chunk_count} transcript chunks.`);
@@ -511,6 +523,7 @@ async function sendMessage() {
     let botText = '';
     let sourceMetadata = [];
     let memoryMetadata = [];
+    let memoryProcessingTurnId = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -532,6 +545,10 @@ async function sendMessage() {
             memoryMetadata = parsed.memories || [];
             continue;
           }
+          if (parsed && parsed.type === 'memory_processing') {
+            memoryProcessingTurnId = parsed.source_turn_id || null;
+            continue;
+          }
           if (parsed && parsed.error) { botBubble.textContent = `⚠ Error: ${parsed.error}`; return; }
           const token = typeof parsed === 'string' ? parsed : (parsed.token || '');
           botText += token;
@@ -544,7 +561,7 @@ async function sendMessage() {
     cursor.remove();
     renderSources(botBubble, sourceMetadata);
     renderMemories(botBubble, memoryMetadata);
-    scheduleConflictCheck(botBubble, currentProjectId, projectScopeInput.value.trim() || null);
+    if (memoryProcessingTurnId) renderMemoryProcessingStatus(botBubble, memoryProcessingTurnId);
     scrollToBottom();
 
   } catch (err) {
@@ -556,30 +573,50 @@ async function sendMessage() {
   }
 }
 
-function scheduleConflictCheck(botBubble, projectId, projectScope) {
-  // Extraction runs after the streamed reply, so retry briefly rather than
-  // making the user send another message or open a terminal.
-  [0, 1500, 4000, 8000].forEach(delay => {
-    setTimeout(() => loadOpenConflicts(botBubble, projectId, projectScope), delay);
-  });
+function renderMemoryProcessingStatus(botBubble, sourceTurnId) {
+  const sessionId = currentSessionId;
+  const status = document.createElement('div');
+  status.className = 'memory-processing-status pending';
+  status.textContent = 'Checking this turn for memories…';
+  botBubble.appendChild(status);
+
+  const poll = async (attempt = 0) => {
+    try {
+      const res = await fetch(`${API}/api/sessions/${sessionId}/memory-extractions/${sourceTurnId}`);
+      if (!res.ok) throw new Error('status unavailable');
+      const result = await res.json();
+      status.className = `memory-processing-status ${result.outcome}`;
+      status.textContent = result.message;
+      if (result.outcome === 'pending' && attempt < 5) {
+        setTimeout(() => poll(attempt + 1), [500, 1000, 2000, 4000, 6000][attempt]);
+      } else if (result.outcome === 'review_required') {
+        renderTurnConflicts(botBubble, result.conflict_ids || []);
+      }
+    } catch (_) {
+      status.className = 'memory-processing-status failed';
+      status.textContent = 'Memory status is unavailable.';
+    }
+  };
+  poll();
 }
 
-async function loadOpenConflicts(botBubble, projectId, projectScope) {
+async function renderTurnConflicts(botBubble, conflictIds) {
+  const unseenIds = conflictIds.filter(id => !shownConflictIds.has(id));
+  if (!unseenIds.length) return;
   try {
-    const params = new URLSearchParams();
-    if (projectId) params.set('project_id', projectId);
-    else if (projectScope) params.set('project_scope', projectScope);
-    const res = await fetch(`${API}/api/memories/conflicts?${params}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    (data.conflicts || [])
-      .filter(conflict => !shownConflictIds.has(conflict.conflict_id))
-      .forEach(conflict => {
+    const responses = await Promise.all(
+      unseenIds.map(id => fetch(`${API}/api/memories/conflicts/${id}`))
+    );
+    for (const response of responses) {
+      if (!response.ok) continue;
+      const conflict = await response.json();
+      if (!shownConflictIds.has(conflict.conflict_id)) {
         shownConflictIds.add(conflict.conflict_id);
         renderConflictReview(botBubble, conflict);
-      });
+      }
+    }
   } catch (err) {
-    console.error('Failed to load memory conflicts:', err);
+    console.error('Failed to load memory conflicts for this turn:', err);
   }
 }
 
@@ -701,7 +738,7 @@ async function uploadFile(file) {
       ? await waitForDocument(data.doc_id, file.name)
       : data;
     if (status.status === 'error') {
-      showToast('❌', `Indexing failed: ${status.message || 'Unknown error'}`);
+      showIngestionFailure(data.doc_id, `Indexing failed: ${status.message || 'Unknown error'}`);
       return null;
     }
     showToast('✅', `Indexed ${status.chunk_count} chunks from "${file.name}"`);
@@ -863,7 +900,37 @@ function autoGrow(el) {
 }
 
 function showToast(icon, text) {
+  retryDocumentId = null;
+  toastRetry.hidden = true;
   uploadStatusIcon.textContent = icon;
   uploadStatusText.textContent = text;
   uploadStatus.hidden = false;
+}
+
+function showIngestionFailure(docId, text) {
+  retryDocumentId = docId;
+  uploadStatusIcon.textContent = '❌';
+  uploadStatusText.textContent = text;
+  toastRetry.hidden = false;
+  uploadStatus.hidden = false;
+}
+
+async function retryIngestion() {
+  if (!retryDocumentId) return;
+  const docId = retryDocumentId;
+  showToast('⏳', 'Retrying ingestion…');
+  try {
+    const res = await fetch(`${API}/api/documents/${docId}/retry`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not retry ingestion');
+    const status = await waitForDocument(data.doc_id, data.filename || 'Document');
+    if (status.status === 'error') {
+      showIngestionFailure(data.doc_id, `Retry failed: ${status.message || 'Unknown error'}`);
+      return;
+    }
+    showToast('✅', `Ingested ${status.chunk_count} chunks.`);
+    setTimeout(() => { uploadStatus.hidden = true; }, 5000);
+  } catch (err) {
+    showIngestionFailure(docId, `Retry failed: ${err.message}`);
+  }
 }

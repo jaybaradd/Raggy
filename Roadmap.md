@@ -6,7 +6,7 @@ This roadmap defines Raggy as a multimodal evidence, retrieval, knowledge-atom, 
 
 1. A retrieval chunk is not a knowledge atom. Chunks support search; atoms support facts, preferences, solutions, entities, temporal reasoning, and contradiction handling.
 2. Multimodal inputs retain modality-specific evidence: OCR, captions, transcripts, frames, tables, layout, timestamps, and bounding boxes.
-3. Session memory is private by default. Promotion to project or user memory is explicit, policy-driven, or user-confirmed.
+3. Session memory is private by default. Promotion to a project is explicit, policy-driven, or user-confirmed. Global user memory is deferred until it has an explicit opt-in product design.
 4. Postgres/object storage is authoritative for records and audit history. Qdrant and Graphiti/FalkorDB are rebuildable projections.
 5. Every durable claim has evidence references, confidence, extraction metadata, owner, scope, and lifecycle status.
 6. Original assets and evidence are never silently overwritten; derived indexes must be reproducible.
@@ -241,6 +241,7 @@ Implementation order:
 - Build one merged memory candidate set across the original query and its subqueries, then make exactly one constrained memory-selection call using the original user question.
 - Resolve a possible event change before ordinary memory retrieval: constrain one generic `update`/`not_update`/`ambiguous` decision to the immediately preceding assistant response's durable trace-linked event. Use the bounded recent-chat window only as reference; an ambiguous result asks for clarification rather than guessing.
 - Keep source evidence, confirmed memory, and prompt assembly separate, with deterministic context limits and safe fallbacks to the original query.
+- Expose durable post-turn memory-processing status in the chat UI, and make failed document/YouTube ingestion explicitly retryable from its immutable source. Cover these lifecycle paths with deterministic local regression tests; live-provider and network behavior remain manual smoke checks.
 
 ### Deferred deliberately
 

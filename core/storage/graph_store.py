@@ -216,7 +216,7 @@ def _now() -> str:
 
 def _visibility_clause(*, alias: str, session_id: str, project_id: str | None,
                        project_scope: str | None) -> tuple[str, list[object]]:
-    clauses = [f"({alias}.scope = 'session' AND {alias}.session_id = ?)", f"{alias}.scope = 'user'"]
+    clauses = [f"({alias}.scope = 'session' AND {alias}.session_id = ?)"]
     params: list[object] = [session_id]
     if project_id:
         clauses.append(f"({alias}.scope = 'project' AND {alias}.project_id = ?)")
