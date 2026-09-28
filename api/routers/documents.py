@@ -1,282 +1,252 @@
-"""
-api/routers/documents.py — document upload and ingestion.
-
-Routes
-------
-POST /documents                 Upload a file (any supported modality)
-POST /documents/youtube         Ingest a YouTube URL
-GET  /documents/{doc_id}/status Ingestion status
-"""
-
+"""Scoped document upload, ingestion status, retry, and source access."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from api.schemas import DocumentStatusResponse, ParseDocumentResponse, UploadDocumentResponse, YouTubeIngestRequest
 from config import settings
+from core.evidence.projections import sync_pending_evidence_projections
 from core.ingestion.chunker import chunk_parsed_chunks
 from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import compute_doc_id, get_parser
-from core.evidence.projections import sync_pending_evidence_projections
 from db.repository_factory import repositories
 
 logger = logging.getLogger(__name__)
 evidence_store = repositories.evidence
+session_store = repositories.sessions
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-_doc_registry: dict[str, DocumentStatusResponse] = {}
-
 _SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".pptx",
-    ".xlsx", ".csv",
-    ".jpg", ".jpeg", ".png", ".webp", ".gif",
-    ".mp4", ".mov", ".avi", ".webm",
+    ".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".jpg", ".jpeg", ".png",
+    ".webp", ".gif", ".mp4", ".mov", ".avi", ".webm",
 }
 
 
+def _session_scope(session_id: str, scope: str) -> tuple[dict, str | None, str | None]:
+    session = session_store.get_session(session_id, owner_id="default")
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    project_id = session.get("project_id")
+    if scope == "project":
+        if not project_id:
+            raise HTTPException(status_code=422, detail="Project scope requires a project session")
+        return session, None, project_id
+    return session, session_id, None
+
+
 def _upload_path(doc_id: str, filename: str) -> Path:
-    """Return a stable, traversal-safe path for a raw uploaded file."""
-    dest = Path(settings.upload_dir) / doc_id
-    dest.mkdir(parents=True, exist_ok=True)
-    safe_name = Path(filename).name or "upload"
-    return dest / safe_name
+    destination = Path(settings.upload_dir) / doc_id
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination / (Path(filename).name or "upload")
 
 
-async def _run_ingestion_job(
-    file_path: Path | str,
-    doc_id: str,
-    modality: str,
-    filename: str,
-    run_id: str | None = None,
-) -> None:
-    """Run heavy parsing off the event loop and update the in-memory status."""
+async def _run_projection_job(run_id: str, binding_id: int, chunk_count: int) -> None:
     try:
-        chunk_count = await asyncio.to_thread(_ingest, file_path, doc_id, modality, filename)
-    except Exception as exc:
-        logger.exception("Ingestion failed for '%s'", filename)
-        _doc_registry[doc_id] = DocumentStatusResponse(
-            doc_id=doc_id, modality=modality, status="error", chunk_count=0, message=str(exc)
+        result = await asyncio.to_thread(
+            sync_pending_evidence_projections, store=evidence_store,
+            binding_id=binding_id, limit=max(chunk_count, 1),
         )
-        if run_id:
-            evidence_store.complete_ingestion(run_id, chunk_count=0, error=str(exc))
-        return
-
-    _doc_registry[doc_id] = DocumentStatusResponse(
-        doc_id=doc_id, modality=modality, status="done", chunk_count=chunk_count
-    )
-    if run_id:
+        if result["failed"]:
+            raise RuntimeError(f"Evidence projection failed for {result['failed']} chunk(s)")
+    except Exception as exc:
+        logger.exception("Projection failed for binding %s", binding_id)
+        evidence_store.complete_ingestion(run_id, chunk_count=0, error=str(exc))
+    else:
         evidence_store.complete_ingestion(run_id, chunk_count=chunk_count)
 
 
-@router.post("", response_model=UploadDocumentResponse, status_code=202)
-async def upload_document(file: UploadFile) -> UploadDocumentResponse:
-    filename = file.filename or "unknown"
-    ext = Path(filename).suffix.lower()
-
-    if ext not in _SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{ext}'. Supported: {sorted(_SUPPORTED_EXTENSIONS)}",
+async def _run_ingestion_job(file_path: Path | str, doc_id: str, binding_id: int,
+                             modality: str, filename: str, run_id: str) -> None:
+    try:
+        chunk_count = await asyncio.to_thread(
+            _ingest, file_path, doc_id, binding_id, modality, filename,
         )
+    except Exception as exc:
+        logger.exception("Ingestion failed for '%s'", filename)
+        evidence_store.complete_ingestion(run_id, chunk_count=0, error=str(exc))
+    else:
+        evidence_store.complete_ingestion(run_id, chunk_count=chunk_count)
 
-    file_bytes = await file.read()
-    doc_id = compute_doc_id(file_bytes)
 
-    if doc_id in _doc_registry and _doc_registry[doc_id].status in {"processing", "done"}:
-        cached = _doc_registry[doc_id]
-        return UploadDocumentResponse(
-            doc_id=doc_id, filename=filename, modality=ext.lstrip("."), status=cached.status,
-            chunk_count=cached.chunk_count,
-            message="Already indexed." if cached.status == "done" else "Ingestion already processing.",
-        )
-
-    modality = ext.lstrip(".")
-    _doc_registry[doc_id] = DocumentStatusResponse(
-        doc_id=doc_id, modality=modality, status="processing", chunk_count=0
+def _start(asset: AssetRecord, *, scope: str, session_id: str, project_id: str | None,
+           modality: str, source: Path | str) -> UploadDocumentResponse:
+    binding_id = evidence_store.upsert_asset(
+        asset, owner_id="default", scope=scope,
+        session_id=session_id if scope == "session" else None,
+        project_id=project_id if scope == "project" else None,
+    )
+    current = evidence_store.get_document_status(
+        binding_id, owner_id="default", session_id=session_id, project_id=project_id,
+    )
+    if current and current["status"] in {"processing", "done"}:
+        return UploadDocumentResponse(**{
+            **current,
+            "filename": asset.filename,
+            "message": "Already indexed." if current["status"] == "done" else "Ingestion already processing.",
+        })
+    run = evidence_store.start_ingestion(asset.asset_id, binding_id=binding_id, modality=modality)
+    existing = evidence_store.enqueue_asset_projections(binding_id)
+    if existing:
+        asyncio.create_task(_run_projection_job(run["run_id"], binding_id, existing))
+    else:
+        asyncio.create_task(_run_ingestion_job(source, asset.asset_id, binding_id, modality, asset.filename, run["run_id"]))
+    return UploadDocumentResponse(
+        doc_id=asset.asset_id, binding_id=binding_id, run_id=run["run_id"], filename=asset.filename,
+        modality=modality, status="processing", chunk_count=0,
+        message="Ingestion started. Poll the document status endpoint.",
     )
 
-    # Persist raw file to disk so raw_file_uri is a real path
-    file_path = _upload_path(doc_id, filename)
-    file_path.write_bytes(file_bytes)
-    evidence_store.upsert_asset(AssetRecord(
-        asset_id=doc_id,
-        filename=filename,
-        media_type=file.content_type or "application/octet-stream",
-        raw_file_uri=file_path.resolve().as_uri(),
-        content_hash=doc_id,
-    ))
-    run = evidence_store.start_ingestion(doc_id, modality=modality)
-    asyncio.create_task(_run_ingestion_job(file_path, doc_id, modality, filename, run["run_id"]))
-    return UploadDocumentResponse(
-        doc_id=doc_id, filename=filename, modality=modality, status="processing",
-        chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
+
+@router.post("", response_model=UploadDocumentResponse, status_code=202)
+async def upload_document(file: UploadFile, session_id: str = Query(...),
+                          scope: Literal["session", "project"] = Query(...)) -> UploadDocumentResponse:
+    _, scoped_session, project_id = _session_scope(session_id, scope)
+    filename = file.filename or "unknown"
+    extension = Path(filename).suffix.lower()
+    if extension not in _SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type '{extension}'")
+    content = await file.read()
+    doc_id = compute_doc_id(content)
+    path = _upload_path(doc_id, filename)
+    path.write_bytes(content)
+    return _start(
+        AssetRecord(asset_id=doc_id, filename=filename,
+                    media_type=file.content_type or "application/octet-stream",
+                    raw_file_uri=path.resolve().as_uri(), content_hash=doc_id),
+        scope=scope, session_id=session_id, project_id=project_id,
+        modality=extension.lstrip("."), source=path,
     )
 
 
 @router.post("/parse", response_model=ParseDocumentResponse)
 async def parse_document(file: UploadFile) -> ParseDocumentResponse:
-    """Parse a file and return its text content — no Qdrant storage.
-
-    Used when a file is attached inline to a chat message. The parsed text is
-    sent back to the frontend and injected directly into that turn's prompt.
-    """
     filename = file.filename or "unknown"
-    ext = Path(filename).suffix.lower()
-
-    if ext not in _SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{ext}'. Supported: {sorted(_SUPPORTED_EXTENSIONS)}",
-        )
-
-    file_bytes = await file.read()
-    modality = ext.lstrip(".")
-
+    extension = Path(filename).suffix.lower()
+    if extension not in _SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type '{extension}'")
     import tempfile
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = Path(tmp.name)
-
+    content = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as temporary:
+        temporary.write(content)
+        path = Path(temporary.name)
     try:
-        parser = get_parser(modality)
-        doc_id = compute_doc_id(file_bytes)
-        raw_chunks = parser.parse(tmp_path, doc_id)
+        chunks = get_parser(extension.lstrip(".")).parse(path, compute_doc_id(content))
+    except Exception as exc:
+        logger.exception("Inline parsing failed for '%s'", filename)
+        raise HTTPException(status_code=422, detail=f"Document parsing failed: {exc}") from exc
     finally:
-        tmp_path.unlink(missing_ok=True)
-
-    # Concatenate all parsed chunk content into one string
-    parsed_text = "\n\n".join(c.content for c in raw_chunks if c.content.strip())
-    return ParseDocumentResponse(filename=filename, modality=modality, parsed_text=parsed_text)
+        path.unlink(missing_ok=True)
+    return ParseDocumentResponse(filename=filename, modality=extension.lstrip("."),
+                                 parsed_text="\n\n".join(c.content for c in chunks if c.content.strip()))
 
 
 @router.post("/youtube", response_model=UploadDocumentResponse, status_code=202)
 async def ingest_youtube(body: YouTubeIngestRequest) -> UploadDocumentResponse:
-    """Ingest a YouTube video by URL — yt-dlp download + Whisper transcription."""
-    url = body.url
-    doc_id = compute_doc_id(url.encode())
+    _, _, project_id = _session_scope(body.session_id, body.scope)
+    doc_id = compute_doc_id(body.url.encode())
+    return _start(
+        AssetRecord(asset_id=doc_id, filename=body.url, media_type="video/x-youtube",
+                    raw_file_uri=body.url, content_hash=doc_id),
+        scope=body.scope, session_id=body.session_id, project_id=project_id,
+        modality="youtube", source=body.url,
+    )
 
-    if doc_id in _doc_registry and _doc_registry[doc_id].status in {"processing", "done"}:
-        cached = _doc_registry[doc_id]
-        return UploadDocumentResponse(
-            doc_id=doc_id, filename=url, modality="youtube", status=cached.status,
-            chunk_count=cached.chunk_count,
-            message="Already indexed." if cached.status == "done" else "Ingestion already processing.",
+
+@router.get("/bindings/{binding_id}/status", response_model=DocumentStatusResponse)
+def document_status(binding_id: int, session_id: str = Query(...)) -> DocumentStatusResponse:
+    try:
+        session = session_store.get_session(session_id, owner_id="default")
+    except Exception as exc:
+        logger.exception("Document status database lookup failed")
+        raise HTTPException(status_code=503, detail="Document status is temporarily unavailable") from exc
+    if not session:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        record = evidence_store.get_document_status(
+            binding_id, owner_id="default", session_id=session_id, project_id=session.get("project_id"),
         )
-
-    _doc_registry[doc_id] = DocumentStatusResponse(
-        doc_id=doc_id, modality="youtube", status="processing", chunk_count=0
-    )
-    evidence_store.upsert_asset(AssetRecord(
-        asset_id=doc_id,
-        filename=url,
-        media_type="video/x-youtube",
-        raw_file_uri=url,
-        content_hash=doc_id,
-    ))
-
-    # Pass the complete URL as a string; YouTubeParser preserves it for yt-dlp.
-    run = evidence_store.start_ingestion(doc_id, modality="youtube")
-    asyncio.create_task(_run_ingestion_job(url, doc_id, "youtube", url, run["run_id"]))
-    return UploadDocumentResponse(
-        doc_id=doc_id, filename=url, modality="youtube", status="processing",
-        chunk_count=0, message="Ingestion started. Poll the document status endpoint.",
-    )
-
-
-@router.get("/{doc_id}/status", response_model=DocumentStatusResponse)
-def document_status(doc_id: str) -> DocumentStatusResponse:
-    record = _doc_registry.get(doc_id)
-    if record is None:
-        stored = evidence_store.get_document_status(doc_id)
-        if stored is not None:
-            return DocumentStatusResponse(**stored)
-    if record is None:
+    except Exception as exc:
+        logger.exception("Document status evidence lookup failed")
+        raise HTTPException(status_code=503, detail="Document status is temporarily unavailable") from exc
+    if not record:
         raise HTTPException(status_code=404, detail="Document not found")
-    return record
+    return DocumentStatusResponse(**record)
 
 
-@router.post("/{doc_id}/retry", response_model=UploadDocumentResponse, status_code=202)
-async def retry_document_ingestion(doc_id: str) -> UploadDocumentResponse:
-    """Start a new run from the immutable source of the latest failed ingestion."""
-    current = evidence_store.get_document_status(doc_id)
-    asset = evidence_store.get_asset(doc_id)
-    if current is None or asset is None:
+@router.post("/bindings/{binding_id}/retry", response_model=UploadDocumentResponse, status_code=202)
+async def retry_document_ingestion(binding_id: int, session_id: str = Query(...)) -> UploadDocumentResponse:
+    session = session_store.get_session(session_id, owner_id="default")
+    if not session:
         raise HTTPException(status_code=404, detail="Document not found")
-    if current["status"] == "processing":
-        raise HTTPException(status_code=409, detail="Ingestion is already processing")
-    if current["status"] == "done":
-        raise HTTPException(status_code=409, detail="Document is already indexed")
-    if current["status"] != "failed":
-        raise HTTPException(status_code=409, detail="Document cannot be retried")
-
-    modality = current["modality"]
-    if modality == "youtube":
-        source: Path | str = asset.raw_file_uri
-    else:
+    context = {"owner_id": "default", "session_id": session_id, "project_id": session.get("project_id")}
+    current = evidence_store.get_document_status(binding_id, **context)
+    asset = evidence_store.get_asset(binding_id, **context)
+    if not current or not asset:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current["status"] in {"processing", "done"}:
+        raise HTTPException(status_code=409, detail=f"Document is already {current['status']}")
+    source: Path | str = asset.raw_file_uri
+    if current["modality"] != "youtube":
         parsed = urlparse(asset.raw_file_uri)
-        if parsed.scheme != "file":
-            raise HTTPException(status_code=422, detail="Stored source cannot be retried")
-        source = Path(unquote(parsed.path)).resolve()
-        upload_root = Path(settings.upload_dir).resolve()
+        path = Path(unquote(parsed.path)).resolve()
         try:
-            source.relative_to(upload_root)
+            path.relative_to(Path(settings.upload_dir).resolve())
         except ValueError as error:
             raise HTTPException(status_code=422, detail="Stored source is outside the upload directory") from error
-        if not source.is_file():
+        if not path.is_file():
             raise HTTPException(status_code=404, detail="Stored source file is unavailable")
+        source = path
+    run = evidence_store.start_ingestion(asset.asset_id, binding_id=binding_id, modality=current["modality"])
+    count = evidence_store.enqueue_asset_projections(binding_id)
+    if count:
+        asyncio.create_task(_run_projection_job(run["run_id"], binding_id, count))
+    else:
+        asyncio.create_task(_run_ingestion_job(source, asset.asset_id, binding_id, current["modality"], asset.filename, run["run_id"]))
+    return UploadDocumentResponse(doc_id=asset.asset_id, binding_id=binding_id, run_id=run["run_id"],
+                                  filename=asset.filename, modality=current["modality"], status="processing")
 
-    _doc_registry[doc_id] = DocumentStatusResponse(doc_id=doc_id, modality=modality, status="processing", chunk_count=0)
-    run = evidence_store.start_ingestion(
-        doc_id, modality=modality, project_id=asset.project_id, project_scope=asset.project_scope,
-    )
-    asyncio.create_task(_run_ingestion_job(source, doc_id, modality, asset.filename, run["run_id"]))
-    return UploadDocumentResponse(
-        doc_id=doc_id, filename=asset.filename, modality=modality, status="processing", chunk_count=0,
-        message="Ingestion retry started.",
-    )
 
-
-@router.get("/{doc_id}/source")
-def document_source(doc_id: str) -> FileResponse:
-    """Serve an uploaded source through the API, never exposing file:// URIs."""
-    directory = Path(settings.upload_dir) / doc_id
-    if not directory.is_dir():
+@router.get("/bindings/{binding_id}/source")
+def document_source(binding_id: int, session_id: str = Query(...)) -> FileResponse:
+    session = session_store.get_session(session_id, owner_id="default")
+    if not session:
         raise HTTPException(status_code=404, detail="Source file not found")
-    files = [path for path in directory.iterdir() if path.is_file()]
-    if not files:
+    asset = evidence_store.get_asset(binding_id, owner_id="default", session_id=session_id,
+                                     project_id=session.get("project_id"))
+    if not asset:
         raise HTTPException(status_code=404, detail="Source file not found")
-    source = files[0]
-    return FileResponse(source, filename=source.name)
+    parsed = urlparse(asset.raw_file_uri)
+    if parsed.scheme != "file":
+        raise HTTPException(status_code=404, detail="Source file is not stored locally")
+    source = Path(unquote(parsed.path)).resolve()
+    try:
+        source.relative_to(Path(settings.upload_dir).resolve())
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Source file not found") from error
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Source file not found")
+    return FileResponse(source, filename=asset.filename)
 
 
-# ── Internal ingestion pipeline ───────────────────────────────────────────────
-
-def _ingest(file_path: Path | str, doc_id: str, modality: str, filename: str) -> int:
-    logger.info("Parsing '%s' (doc_id=%s, modality=%s) …", filename, doc_id[:8], modality)
-    parser = get_parser(modality)
-    raw_chunks = parser.parse(file_path, doc_id)
-    logger.info("Parsed %d raw blocks; chunking …", len(raw_chunks))
-
-    chunks = chunk_parsed_chunks(raw_chunks)
-    if not chunks:
-        logger.warning("No chunks produced for '%s'", filename)
-        return 0
-
+def _ingest(file_path: Path | str, doc_id: str, binding_id: int, modality: str, filename: str) -> int:
+    started = time.monotonic()
+    parsed = get_parser(modality).parse(file_path, doc_id)
+    logger.info("Parsed '%s' into %d raw blocks in %.2fs", filename, len(parsed), time.monotonic() - started)
+    chunks = chunk_parsed_chunks(parsed)
     for chunk in chunks:
         chunk.embedding_model = settings.local_embed_model
-        chunk.source_name = Path(filename).name if modality != "youtube" else filename
-
-    evidence_store.upsert_evidence([
-        EvidenceSegment.from_chunk(chunk) for chunk in chunks
-    ])
-    projection_result = sync_pending_evidence_projections(store=evidence_store)
-    if projection_result["failed"]:
-        raise RuntimeError(f"Evidence projection failed for {projection_result['failed']} chunk(s)")
-    logger.info("Stored and projected %d chunks for doc_id=%s", len(chunks), doc_id[:8])
+        chunk.source_name = filename if modality == "youtube" else Path(filename).name
+    evidence_store.upsert_evidence([EvidenceSegment.from_chunk(chunk) for chunk in chunks], binding_id=binding_id)
+    result = sync_pending_evidence_projections(store=evidence_store, binding_id=binding_id, limit=max(len(chunks), 1))
+    if result["failed"]:
+        raise RuntimeError(f"Evidence projection failed for {result['failed']} chunk(s)")
+    logger.info("Ingested '%s' into %d chunks in %.2fs", filename, len(chunks), time.monotonic() - started)
     return len(chunks)

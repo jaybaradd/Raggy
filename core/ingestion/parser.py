@@ -90,8 +90,17 @@ class PdfParser(Parser):
     BACKEND = "docling-pdf"
 
     def __init__(self) -> None:
-        from docling.document_converter import DocumentConverter
-        self._converter = DocumentConverter()
+        from config import settings
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = settings.pdf_ocr_enabled
+        pipeline_options.do_table_structure = settings.pdf_table_structure_enabled
+        self._converter = DocumentConverter(format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        })
 
     def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
         result = self._converter.convert(str(file_path))

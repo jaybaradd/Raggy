@@ -17,7 +17,7 @@ def _chunk(segment: EvidenceSegment) -> ParsedChunk:
                        created_at=segment.created_at)
 
 def sync_pending_evidence_projections(*, store, qdrant=None, embedder_client=None,
-                                      limit: int = 100) -> dict[str, int]:
+                                      limit: int = 100, binding_id: int | None = None) -> dict[str, int]:
     """Project durable evidence records to Qdrant.
 
     The embedding dependency is loaded only when work exists.  Supplying it
@@ -28,17 +28,19 @@ def sync_pending_evidence_projections(*, store, qdrant=None, embedder_client=Non
         from core.storage.qdrant_store import qdrant_store
         qdrant = qdrant_store
     completed = failed = skipped = 0
-    for job in store.claim_projection_jobs(limit=limit):
-        segment = store.get_evidence_for_projection(job["evidence_id"])
-        if segment is None:
+    for job in store.claim_projection_jobs(limit=limit, binding_id=binding_id):
+        projection = store.get_projection_input(job["evidence_id"], binding_id=job["binding_id"])
+        if projection is None:
             store.fail_projection_job(job["job_id"], "evidence segment no longer exists"); failed += 1; continue
+        segment = projection["segment"]
         if not (segment.content or "").strip():
             store.complete_projection_job(job["job_id"]); completed += 1; skipped += 1; continue
         try:
             if embedder_client is None:
                 from core.embeddings import embedder as default_embedder
                 embedder_client = default_embedder
-            chunk = _chunk(segment); qdrant.upsert([chunk], embedder_client.encode([chunk.content]))
+            chunk = _chunk(segment)
+            qdrant.upsert([chunk], embedder_client.encode([chunk.content]), binding=projection)
         except Exception as exc:
             logger.exception("Evidence projection failed for %s", segment.evidence_id)
             store.fail_projection_job(job["job_id"], str(exc)); failed += 1

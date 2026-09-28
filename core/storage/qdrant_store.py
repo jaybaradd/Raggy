@@ -22,6 +22,7 @@ The client operates in two modes:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -124,6 +125,17 @@ class QdrantStore:
                 self._collection,
                 self._dim,
             )
+            if self._collection != settings.memory_collection:
+                for field in ("owner_id", "scope", "session_id", "project_id", "doc_id"):
+                    self._client.create_payload_index(
+                        collection_name=self._collection,
+                        field_name=field,
+                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                    )
+                self._client.create_payload_index(
+                    collection_name=self._collection, field_name="binding_id",
+                    field_schema=qmodels.PayloadSchemaType.INTEGER,
+                )
 
     def _encode_sparse(self, texts: list[str]) -> list[qmodels.SparseVector]:
         """Return BM25 SparseVector objects for a batch of texts."""
@@ -143,10 +155,10 @@ class QdrantStore:
         """Return a lazily-created collection sharing this store's client."""
         collection = {
             "text": settings.qdrant_collection,
-            "table": "kb_table_chunks",
-            "image": "kb_image_chunks",
-            "video_segment": "kb_video_segments",
-            "audio_segment": "kb_video_segments",
+            "table": settings.qdrant_table_collection,
+            "image": settings.qdrant_image_collection,
+            "video_segment": settings.qdrant_video_collection,
+            "audio_segment": settings.qdrant_video_collection,
         }.get(modality, settings.qdrant_collection)
         if collection == self._collection:
             return self
@@ -165,6 +177,8 @@ class QdrantStore:
         self,
         chunks: list[ParsedChunk],
         vectors: list[list[float]],
+        *,
+        binding: dict,
     ) -> None:
         """
         Upsert *chunks* with both dense and sparse (BM25) vectors.
@@ -188,15 +202,17 @@ class QdrantStore:
             group[1].append(vector)
         if len(groups) > 1 or (groups and next(iter(groups)) != "text"):
             for modality, (group_chunks, group_vectors) in groups.items():
-                self._collection_store(modality)._upsert_single(group_chunks, group_vectors)
+                self._collection_store(modality)._upsert_single(group_chunks, group_vectors, binding=binding)
             return
 
-        self._upsert_single(chunks, vectors)
+        self._upsert_single(chunks, vectors, binding=binding)
 
     def _upsert_single(
         self,
         chunks: list[ParsedChunk],
         vectors: list[list[float]],
+        *,
+        binding: dict,
     ) -> None:
         """Upsert chunks known to belong to this collection."""
 
@@ -206,7 +222,7 @@ class QdrantStore:
 
         points = [
             qmodels.PointStruct(
-                id=_chunk_id_to_int(chunk.chunk_id),
+                id=_evidence_point_id(chunk.evidence_id or chunk.chunk_id, int(binding["binding_id"])),
                 vector={
                     "dense": dense_vector,
                     _SPARSE_VECTOR_NAME: sparse_vec,
@@ -215,6 +231,11 @@ class QdrantStore:
                     "chunk_id": chunk.chunk_id,
                     "evidence_id": chunk.evidence_id or chunk.chunk_id,
                     "doc_id": chunk.doc_id,
+                    "binding_id": int(binding["binding_id"]),
+                    "owner_id": binding["owner_id"],
+                    "scope": binding["scope"],
+                    "session_id": binding.get("session_id"),
+                    "project_id": binding.get("project_id"),
                     "modality": chunk.modality,
                     "representation": chunk.representation,
                     "content": chunk.content,
@@ -240,6 +261,10 @@ class QdrantStore:
         self,
         query_vector: list[float],
         query_text: str,
+        *,
+        owner_id: str,
+        session_id: str,
+        project_id: str | None,
         top_k: int | None = None,
         doc_id_filter: str | None = None,
     ) -> list[dict]:
@@ -247,9 +272,13 @@ class QdrantStore:
         k = top_k or settings.hybrid_candidates
         weights = {"text": 1.0, "table": 1.0, "image": 0.8, "video_segment": 0.7, "audio_segment": 0.7}
         results: list[dict] = []
+        query_filter = _evidence_filter(
+            owner_id=owner_id, session_id=session_id, project_id=project_id,
+            doc_id_filter=doc_id_filter,
+        )
         for modality in ("text", "table", "image", "video_segment"):
             store = self._collection_store(modality)
-            for result in store.search(query_vector, query_text, k, doc_id_filter):
+            for result in store.search(query_vector, query_text, k, query_filter=query_filter):
                 result["score"] = float(result.get("score", 0.0)) * weights.get(modality, 1.0)
                 result["collection"] = store._collection
                 results.append(result)
@@ -461,6 +490,28 @@ def _chunk_id_to_int(chunk_id: str) -> int:
     We convert the UUID hex to an int that fits in 63 bits.
     """
     return int(chunk_id.replace("-", ""), 16) % (2**63)
+
+
+def _evidence_point_id(evidence_id: str, binding_id: int) -> str:
+    """Stable point identity for one evidence segment in one visibility binding."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"raggy-evidence:{evidence_id}:{binding_id}"))
+
+
+def _evidence_filter(*, owner_id: str, session_id: str, project_id: str | None,
+                     doc_id_filter: str | None = None) -> qmodels.Filter:
+    must: list = [qmodels.FieldCondition(key="owner_id", match=qmodels.MatchValue(value=owner_id))]
+    if doc_id_filter:
+        must.append(qmodels.FieldCondition(key="doc_id", match=qmodels.MatchValue(value=doc_id_filter)))
+    visible: list = [qmodels.Filter(must=[
+        qmodels.FieldCondition(key="scope", match=qmodels.MatchValue(value="session")),
+        qmodels.FieldCondition(key="session_id", match=qmodels.MatchValue(value=session_id)),
+    ])]
+    if project_id is not None:
+        visible.append(qmodels.Filter(must=[
+            qmodels.FieldCondition(key="scope", match=qmodels.MatchValue(value="project")),
+            qmodels.FieldCondition(key="project_id", match=qmodels.MatchValue(value=project_id)),
+        ]))
+    return qmodels.Filter(must=must, should=visible)
 
 
 # Module-level singleton

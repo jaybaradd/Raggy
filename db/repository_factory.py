@@ -34,13 +34,9 @@ def create_repositories(config: Settings = settings) -> Repositories:
         except Exception as error:
             raise RuntimeError("Postgres authoritative repository initialization failed") from error
         return Repositories(sessions, memories, evidence, graph)
-    if config.authoritative_db_backend != "sqlite":
-        raise RuntimeError(f"Unsupported authoritative database backend: {config.authoritative_db_backend}")
-    # Imports remain here so application callers do not bind to SQLite classes.
-    from db.session_store import session_store
-    from core.storage.memory_store import memory_store
-    from core.storage.evidence_store import evidence_store
-    return Repositories(session_store, memory_store, evidence_store, _create_graph_repository(config))
+    if config.authoritative_db_backend == "sqlite":
+        raise RuntimeError("SQLite authority is a legacy archive; configure AUTHORITATIVE_DB_BACKEND=postgres")
+    raise RuntimeError(f"Unsupported authoritative database backend: {config.authoritative_db_backend}")
 
 
 def _create_graph_repository(config: Settings) -> GraphRepository:

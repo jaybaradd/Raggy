@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routers import documents, memories, messages, projects, sessions
 from api.schemas import HealthResponse
+from config import settings
 from core.evidence.projections import sync_pending_evidence_projections
 from core.memory.expiry import expiry_sweep_loop, run_expiry_sweep
 from core.memory.projections import sync_pending_projections
@@ -40,6 +41,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class _DocumentStatusAccessFilter(logging.Filter):
+    """Keep high-frequency ingestion status checks out of Uvicorn access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            '"GET /api/documents/bindings/' in message
+            and '/status?' in message
+        )
+
+
+logging.getLogger("uvicorn.access").addFilter(_DocumentStatusAccessFilter())
+
 # ── Application ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -48,9 +63,9 @@ async def lifespan(_: FastAPI):
     selected_repositories = repositories.get()
     logger.info(
         "Repository runtime selected: authority=%s graph=%s graph_name=%s",
-        _settings.authoritative_db_backend,
-        _settings.graph_projection_backend,
-        _settings.falkordb_graph_name if _settings.graph_projection_backend == "falkor" else "n/a",
+        settings.authoritative_db_backend,
+        settings.graph_projection_backend,
+        settings.falkordb_graph_name if settings.graph_projection_backend == "falkor" else "n/a",
     )
     memory_store = selected_repositories.memories
     session_store = selected_repositories.sessions
@@ -131,13 +146,7 @@ def health() -> HealthResponse:
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────
-# Serve uploaded raw files (used by raw_file_uri references)
-from pathlib import Path as _Path
-from config import settings as _settings
-_Path(_settings.upload_dir).mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=_settings.upload_dir), name="uploads")
-
-# Frontend — must be mounted LAST so /api/* and /uploads/* are matched first
+# Frontend — must be mounted last so /api/* routes are matched first.
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 

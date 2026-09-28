@@ -131,10 +131,23 @@ podman compose up -d postgres qdrant falkordb
 ```
 
 The launcher explicitly selects PostgreSQL authority and FalkorDB graph
-projection. Plain `python main.py` remains the SQLite compatibility mode.
+projection. SQLite files are retained only as legacy archives and are not a
+supported application authority.
 
 The host launcher expects Postgres on `localhost:5433`; the containerized app
 uses `postgres:5432` internally.
+
+Before the first scoped-knowledge-base startup, inspect and explicitly reset
+the legacy evidence tables:
+
+```bash
+python scripts/reset_knowledge_base.py
+python scripts/reset_knowledge_base.py --execute --confirm RESET_KNOWLEDGE_BASE
+```
+
+The reset leaves projects, chats, messages, memories, and memory projections
+untouched. Raw files and configured evidence collections require separate
+explicit flags.
 
 ## Configuration
 

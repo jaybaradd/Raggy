@@ -32,7 +32,10 @@ class Settings(BaseSettings):
     # ":memory:" → in-process Qdrant (no server needed, data lost on restart)
     # "http://localhost:6333" → connect to a running Qdrant container
     qdrant_url: str = Field(default=":memory:", alias="QDRANT_URL")
-    qdrant_collection: str = Field(default="kb_text_chunks", alias="QDRANT_COLLECTION")
+    qdrant_collection: str = Field(default="kb_text_chunks_v2", alias="QDRANT_COLLECTION")
+    qdrant_table_collection: str = Field(default="kb_table_chunks_v2", alias="QDRANT_TABLE_COLLECTION")
+    qdrant_image_collection: str = Field(default="kb_image_chunks_v2", alias="QDRANT_IMAGE_COLLECTION")
+    qdrant_video_collection: str = Field(default="kb_video_segments_v2", alias="QDRANT_VIDEO_COLLECTION")
     memory_collection: str = Field(default="kb_memory_records", alias="MEMORY_COLLECTION")
 
     # ── Chunking ──────────────────────────────────────────────────────────────
@@ -81,12 +84,14 @@ class Settings(BaseSettings):
     )
     session_db_path: str = Field(default="./raggy_memory.sqlite3", alias="SESSION_DB_PATH")
     authoritative_db_backend: Literal["sqlite", "postgres"] = Field(
-        default="sqlite", alias="AUTHORITATIVE_DB_BACKEND"
+        default="postgres", alias="AUTHORITATIVE_DB_BACKEND"
     )
     postgres_database_url: str = Field(default="", alias="POSTGRES_DATABASE_URL")
     postgres_schema: str | None = Field(default=None, alias="POSTGRES_SCHEMA")
     whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
+    pdf_ocr_enabled: bool = Field(default=False, alias="PDF_OCR_ENABLED")
+    pdf_table_structure_enabled: bool = Field(default=False, alias="PDF_TABLE_STRUCTURE_ENABLED")
 
 
 # Module-level singleton — import this object everywhere.

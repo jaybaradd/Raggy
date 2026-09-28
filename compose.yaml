@@ -10,7 +10,10 @@ services:
       POSTGRES_DATABASE_URL: postgresql://raggy:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/raggy
       POSTGRES_SCHEMA: public
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: raggy_postgres_evidence
+      QDRANT_COLLECTION: raggy_postgres_evidence_v2
+      QDRANT_TABLE_COLLECTION: raggy_postgres_tables_v2
+      QDRANT_IMAGE_COLLECTION: raggy_postgres_images_v2
+      QDRANT_VIDEO_COLLECTION: raggy_postgres_video_v2
       MEMORY_COLLECTION: raggy_postgres_memories
       GRAPH_PROJECTION_BACKEND: falkor
       FALKORDB_URL: redis://falkordb:6379

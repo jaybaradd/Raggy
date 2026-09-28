@@ -9,17 +9,16 @@ from db.repository_factory import Repositories, _LazyRepositories, create_reposi
 
 
 class RepositoryFactoryTests(unittest.TestCase):
-    def test_sqlite_is_the_default_backend(self) -> None:
-        repositories = create_repositories(Settings())
-        self.assertTrue(hasattr(repositories.sessions, "create_session"))
-        self.assertTrue(hasattr(repositories.memories, "capture_event"))
+    def test_sqlite_is_rejected_as_a_legacy_archive(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "legacy archive"):
+            create_repositories(Settings(AUTHORITATIVE_DB_BACKEND="sqlite"))
 
     def test_postgres_requires_a_connection_url(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "POSTGRES_DATABASE_URL"):
             create_repositories(Settings(AUTHORITATIVE_DB_BACKEND="postgres", POSTGRES_DATABASE_URL=""))
 
     def test_postgres_constructs_all_authoritative_repositories_together(self) -> None:
-        config = Settings(AUTHORITATIVE_DB_BACKEND="postgres", POSTGRES_DATABASE_URL="postgresql://example", POSTGRES_SCHEMA="test_schema")
+        config = Settings(AUTHORITATIVE_DB_BACKEND="postgres", POSTGRES_DATABASE_URL="postgresql://example", POSTGRES_SCHEMA="test_schema", GRAPH_PROJECTION_BACKEND="sqlite")
         class Fake:
             def __init__(self, *args, **kwargs): self.args, self.kwargs = args, kwargs
         with patch("db.postgres_session_store.PostgresSessionRepository", Fake), \
@@ -39,12 +38,18 @@ class RepositoryFactoryTests(unittest.TestCase):
                 create_repositories(config)
 
     def test_falkor_graph_is_selected_without_changing_authoritative_repositories(self) -> None:
-        config = Settings(GRAPH_PROJECTION_BACKEND="falkor", FALKORDB_URL="redis://example:6380")
+        config = Settings(AUTHORITATIVE_DB_BACKEND="postgres", POSTGRES_DATABASE_URL="postgresql://example", GRAPH_PROJECTION_BACKEND="falkor", FALKORDB_URL="redis://example:6380")
 
         class FakeGraph:
             def __init__(self, *args, **kwargs): self.kwargs = kwargs
 
-        with patch("core.storage.falkor_graph_store.FalkorGraphStore", FakeGraph):
+        class FakeAuthority:
+            def __init__(self, *args, **kwargs): pass
+
+        with patch("db.postgres_session_store.PostgresSessionRepository", FakeAuthority), \
+             patch("db.postgres_memory_store.PostgresMemoryRepository", FakeAuthority), \
+             patch("db.postgres_evidence_store.PostgresEvidenceRepository", FakeAuthority), \
+             patch("core.storage.falkor_graph_store.FalkorGraphStore", FakeGraph):
             repositories = create_repositories(config)
 
         self.assertIsInstance(repositories.graph, FakeGraph)

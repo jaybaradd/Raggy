@@ -8,7 +8,7 @@ let currentProjectId = null;
 let isStreaming = false;
 let pendingFile = null;       // File object waiting to be uploaded on send
 let detectedYtUrl = null;     // YouTube URL detected in textarea
-let retryDocumentId = null;
+let retryDocument = null;
 const shownConflictIds = new Set();
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -32,6 +32,8 @@ const attachmentName     = document.getElementById('attachmentName');
 const attachmentIcon     = document.getElementById('attachmentIcon');
 const attachmentRemove   = document.getElementById('attachmentRemove');
 const indexFileCheckbox  = document.getElementById('indexFileCheckbox');
+const chatOnlyOption     = document.getElementById('chatOnlyOption');
+const chatOnlyCheckbox   = document.getElementById('chatOnlyCheckbox');
 const knowledgeBaseToggle = document.getElementById('knowledgeBaseToggle');
 const ytPrompt           = document.getElementById('ytPrompt');
 const ytConfirm          = document.getElementById('ytConfirm');
@@ -278,15 +280,15 @@ async function ingestYouTube(url) {
     const res = await fetch(`${API}/api/documents/youtube`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, session_id: currentSessionId, scope: knowledgeBaseScope() }),
     });
     const data = await res.json();
     if (!res.ok) { showToast('❌', `Failed: ${data.detail || 'Unknown error'}`); return; }
     const status = data.status === 'processing'
-      ? await waitForDocument(data.doc_id, 'YouTube transcript')
+      ? await waitForDocument(data.binding_id, 'YouTube transcript')
       : data;
-    if (status.status === 'error') {
-      showIngestionFailure(data.doc_id, `Ingestion failed: ${status.message || 'Unknown error'}`);
+    if (status.status === 'failed') {
+      showIngestionFailure(data.binding_id, `Ingestion failed: ${status.message || 'Unknown error'}`);
       return;
     }
     showToast('✅', `Ingested ${status.chunk_count} transcript chunks.`);
@@ -308,6 +310,7 @@ function setPendingFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   attachmentIcon.textContent = MODALITY_ICONS[ext] || '📎';
   attachmentName.textContent = file.name;
+  chatOnlyOption.hidden = !currentProjectId;
   attachmentPreview.hidden = false;
   updateSendBtn();
 }
@@ -315,6 +318,8 @@ function setPendingFile(file) {
 function clearPendingFile() {
   pendingFile = null;
   indexFileCheckbox.checked = false;
+  chatOnlyCheckbox.checked = false;
+  chatOnlyOption.hidden = true;
   attachmentPreview.hidden = true;
   updateSendBtn();
 }
@@ -474,8 +479,10 @@ async function sendMessage() {
         knowledgeBaseToggle.checked = true;
         attachments = [buildAttachmentMetadata(file, 'knowledge_base', { document_id: indexed.doc_id })];
       } else {
-        inlineContext = await parseFile(file);
-        attachments = [buildAttachmentMetadata(file, 'inline')];
+        // Saving to the knowledge base was the user's explicit choice. Do not
+        // silently turn a failed ingestion into an inline-only attachment: it
+        // makes the question appear to use indexed evidence when it did not.
+        return;
       }
     } else {
       inlineContext = await parseFile(file);
@@ -731,14 +738,15 @@ async function uploadFile(file) {
   const formData = new FormData();
   formData.append('file', file);
   try {
-    const res = await fetch(`${API}/api/documents`, { method: 'POST', body: formData });
+    const params = new URLSearchParams({ session_id: currentSessionId, scope: knowledgeBaseScope() });
+    const res = await fetch(`${API}/api/documents?${params}`, { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) { showToast('❌', `Upload failed: ${data.detail || 'Unknown error'}`); return null; }
     const status = data.status === 'processing'
-      ? await waitForDocument(data.doc_id, file.name)
+      ? await waitForDocument(data.binding_id, file.name)
       : data;
-    if (status.status === 'error') {
-      showIngestionFailure(data.doc_id, `Indexing failed: ${status.message || 'Unknown error'}`);
+    if (status.status === 'failed') {
+      showIngestionFailure(data.binding_id, `Indexing failed: ${status.message || 'Unknown error'}`);
       return null;
     }
     showToast('✅', `Indexed ${status.chunk_count} chunks from "${file.name}"`);
@@ -751,15 +759,21 @@ async function uploadFile(file) {
 }
 
 /** Poll the asynchronous ingestion job until it reaches a terminal state. */
-async function waitForDocument(docId, label) {
-  const maxAttempts = 1200; // 20 minutes at one request per second
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const res = await fetch(`${API}/api/documents/${docId}/status`);
-    const status = await res.json();
+async function waitForDocument(bindingId, label, sessionId = currentSessionId) {
+  const deadline = Date.now() + 20 * 60 * 1000;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    // Check quickly at first, then settle at five seconds. Ingestion normally
+    // takes seconds or minutes; one request per second only creates DB/log noise.
+    const delay = [1000, 2000, 3000, 5000][Math.min(attempt, 3)];
+    await new Promise(resolve => setTimeout(resolve, delay));
+    const params = new URLSearchParams({ session_id: sessionId });
+    const res = await fetch(`${API}/api/documents/bindings/${bindingId}/status?${params}`);
+    const status = await res.json().catch(() => ({ detail: `Status request failed (${res.status})` }));
     if (!res.ok) throw new Error(status.detail || `Could not read ${label} status`);
     if (status.status === 'processing') {
       showToast('⏳', `${label}: still processing…`);
+      attempt += 1;
       continue;
     }
     return status;
@@ -900,15 +914,15 @@ function autoGrow(el) {
 }
 
 function showToast(icon, text) {
-  retryDocumentId = null;
+  retryDocument = null;
   toastRetry.hidden = true;
   uploadStatusIcon.textContent = icon;
   uploadStatusText.textContent = text;
   uploadStatus.hidden = false;
 }
 
-function showIngestionFailure(docId, text) {
-  retryDocumentId = docId;
+function showIngestionFailure(bindingId, text) {
+  retryDocument = { bindingId, sessionId: currentSessionId };
   uploadStatusIcon.textContent = '❌';
   uploadStatusText.textContent = text;
   toastRetry.hidden = false;
@@ -916,21 +930,26 @@ function showIngestionFailure(docId, text) {
 }
 
 async function retryIngestion() {
-  if (!retryDocumentId) return;
-  const docId = retryDocumentId;
+  if (!retryDocument) return;
+  const { bindingId, sessionId } = retryDocument;
   showToast('⏳', 'Retrying ingestion…');
   try {
-    const res = await fetch(`${API}/api/documents/${docId}/retry`, { method: 'POST' });
+    const params = new URLSearchParams({ session_id: sessionId });
+    const res = await fetch(`${API}/api/documents/bindings/${bindingId}/retry?${params}`, { method: 'POST' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Could not retry ingestion');
-    const status = await waitForDocument(data.doc_id, data.filename || 'Document');
-    if (status.status === 'error') {
-      showIngestionFailure(data.doc_id, `Retry failed: ${status.message || 'Unknown error'}`);
+    const status = await waitForDocument(data.binding_id, data.filename || 'Document', sessionId);
+    if (status.status === 'failed') {
+      showIngestionFailure(data.binding_id, `Retry failed: ${status.message || 'Unknown error'}`);
       return;
     }
     showToast('✅', `Ingested ${status.chunk_count} chunks.`);
     setTimeout(() => { uploadStatus.hidden = true; }, 5000);
   } catch (err) {
-    showIngestionFailure(docId, `Retry failed: ${err.message}`);
+    showIngestionFailure(bindingId, `Retry failed: ${err.message}`);
   }
+}
+
+function knowledgeBaseScope() {
+  return currentProjectId && !chatOnlyCheckbox.checked ? 'project' : 'session';
 }

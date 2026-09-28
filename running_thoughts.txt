@@ -33,3 +33,5 @@ candidate session memories:
 
 confirmed user/project memories:
   expire only explicitly or through an explicit valid_to date
+
+the document knowledge base search is global, the project and session scoped retrieval is only implemented for memories atp. need to make knowledge base project or session scoped.

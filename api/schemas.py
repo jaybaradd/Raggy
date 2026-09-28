@@ -93,6 +93,8 @@ class SendMessageRequest(BaseModel):
 
 class UploadDocumentResponse(BaseModel):
     doc_id: str
+    binding_id: int
+    run_id: str | None = None
     filename: str
     modality: str = ""
     status: str
@@ -102,6 +104,8 @@ class UploadDocumentResponse(BaseModel):
 
 class DocumentStatusResponse(BaseModel):
     doc_id: str
+    binding_id: int
+    run_id: str | None = None
     modality: str = ""
     status: str
     chunk_count: int
@@ -116,6 +120,8 @@ class ParseDocumentResponse(BaseModel):
 
 class YouTubeIngestRequest(BaseModel):
     url: str = Field(..., description="YouTube video URL")
+    session_id: str
+    scope: Literal["session", "project"]
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

@@ -38,6 +38,31 @@ engine = _engine_without_ml_runtime()
 
 
 class QueryDecompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_postgres_revalidation_replaces_qdrant_content_and_rejects_stale_hits(self) -> None:
+        class Evidence:
+            def revalidate_evidence(self, references, **scope):
+                self.references, self.scope = references, scope
+                return {("kept", 7): {
+                    "evidence_id": "kept", "binding_id": 7, "asset_id": "asset",
+                    "modality": "text", "representation": "text", "content": "authoritative",
+                    "source_name": "source.pdf", "media_uri": "file:///source.pdf",
+                    "locator_json": {"page": 3},
+                }}
+
+        evidence = Evidence()
+        candidates = [
+            {"evidence_id": "kept", "binding_id": 7, "content": "stale", "score": 0.8},
+            {"evidence_id": "rejected", "binding_id": 8, "content": "unauthorized", "score": 0.9},
+        ]
+        with patch.object(engine, "repositories", types.SimpleNamespace(evidence=evidence)):
+            result = engine._revalidate_candidates(
+                candidates, owner_id="owner", session_id="session", project_id="project",
+            )
+        self.assertEqual([item["evidence_id"] for item in result], ["kept"])
+        self.assertEqual(result[0]["content"], "authoritative")
+        self.assertEqual(result[0]["page"], 3)
+        self.assertEqual(evidence.references, [("kept", 7), ("rejected", 8)])
+
     async def test_compound_question_uses_validated_model_subqueries(self) -> None:
         provider = type("Provider", (), {
             "generate_json": AsyncMock(return_value={
@@ -60,15 +85,18 @@ class QueryDecompositionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_merged_candidates_are_reranked_against_original_question(self) -> None:
         provider = object()
-        first = {"evidence_id": "a", "content": "first"}
-        duplicate = {"evidence_id": "a", "content": "duplicate"}
-        second = {"evidence_id": "b", "content": "second"}
+        first = {"evidence_id": "a", "binding_id": 1, "content": "first"}
+        duplicate = {"evidence_id": "a", "binding_id": 1, "content": "duplicate"}
+        second = {"evidence_id": "b", "binding_id": 1, "content": "second"}
         with (
             patch("core.retrieval.decomposition.decompose_query", AsyncMock(return_value=["one", "two"])),
             patch("core.retrieval.engine._retrieve_candidates", side_effect=[[first, duplicate], [second]]),
+            patch("core.retrieval.engine._revalidate_candidates", side_effect=lambda items, **_: items),
             patch.object(engine.reranker, "rerank", return_value=[second, first]) as rerank,
         ):
-            result = await engine.retrieve_with_decomposition("original question", provider=provider)
+            result = await engine.retrieve_with_decomposition(
+                "original question", provider=provider, owner_id="owner", session_id="session", project_id=None,
+            )
 
         self.assertEqual(result.chunks, [second, first])
         self.assertEqual(result.context, "[Source 1]\nsecond\n\n[Source 2]\nfirst")

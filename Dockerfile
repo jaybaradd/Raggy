@@ -14,6 +14,12 @@ COPY requirements.txt ./
 # timeout so a slow PyPI transfer does not discard an otherwise valid build.
 RUN pip install --no-cache-dir --retries 5 --timeout 180 -r requirements.txt
 
+# Docling imports OpenCV for PDF table/layout processing. The slim Python
+# image does not include OpenCV's shared-library runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . ./
 
 EXPOSE 8000

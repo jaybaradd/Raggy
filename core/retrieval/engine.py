@@ -24,6 +24,7 @@ from config import settings
 from core.embeddings import embedder
 from core.retrieval.reranker import reranker
 from core.storage.qdrant_store import qdrant_store
+from db.repository_factory import repositories
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,10 @@ def _clean_query(raw_query: str) -> str:
 
 def retrieve(
     query: str,
+    *,
+    owner_id: str,
+    session_id: str,
+    project_id: str | None,
     top_k: int | None = None,
     doc_id_filter: str | None = None,
 ) -> RetrievalResult:
@@ -70,7 +75,11 @@ def retrieve(
     -------
     RetrievalResult with the formatted context string and reranked chunk list.
     """
-    candidates = _retrieve_candidates(query, top_k=top_k, doc_id_filter=doc_id_filter)
+    candidates = _retrieve_candidates(
+        query, owner_id=owner_id, session_id=session_id, project_id=project_id,
+        top_k=top_k, doc_id_filter=doc_id_filter,
+    )
+    candidates = _revalidate_candidates(candidates, owner_id=owner_id, session_id=session_id, project_id=project_id)
     return _rerank_and_format(query, candidates)
 
 
@@ -78,6 +87,9 @@ async def retrieve_with_decomposition(
     query: str,
     *,
     provider: object,
+    owner_id: str,
+    session_id: str,
+    project_id: str | None,
     top_k: int | None = None,
     doc_id_filter: str | None = None,
 ) -> RetrievalResult:
@@ -88,13 +100,18 @@ async def retrieve_with_decomposition(
     candidates = _deduplicate_candidates([
         candidate
         for subquery in subqueries
-        for candidate in _retrieve_candidates(subquery, top_k=top_k, doc_id_filter=doc_id_filter)
+        for candidate in _retrieve_candidates(
+            subquery, owner_id=owner_id, session_id=session_id, project_id=project_id,
+            top_k=top_k, doc_id_filter=doc_id_filter,
+        )
     ])
+    candidates = _revalidate_candidates(candidates, owner_id=owner_id, session_id=session_id, project_id=project_id)
     return _rerank_and_format(query, candidates)
 
 
 def _retrieve_candidates(
-    query: str, *, top_k: int | None = None, doc_id_filter: str | None = None,
+    query: str, *, owner_id: str, session_id: str, project_id: str | None,
+    top_k: int | None = None, doc_id_filter: str | None = None,
 ) -> list[dict]:
     """Run hybrid retrieval only; callers choose the final reranking strategy."""
     clean_q = _clean_query(query)
@@ -102,6 +119,9 @@ def _retrieve_candidates(
     return qdrant_store.search_all(
         query_vector=query_vector,
         query_text=clean_q,
+        owner_id=owner_id,
+        session_id=session_id,
+        project_id=project_id,
         top_k=top_k or settings.hybrid_candidates,
         doc_id_filter=doc_id_filter,
     )
@@ -112,12 +132,57 @@ def _deduplicate_candidates(candidates: list[dict]) -> list[dict]:
     unique: list[dict] = []
     seen: set[str] = set()
     for candidate in candidates:
-        identity = str(candidate.get("evidence_id") or candidate.get("chunk_id") or "")
+        evidence_id = str(candidate.get("evidence_id") or candidate.get("chunk_id") or "")
+        binding_id = candidate.get("binding_id")
+        identity = f"{evidence_id}:{binding_id}" if evidence_id and binding_id is not None else ""
         if not identity or identity in seen:
             continue
         seen.add(identity)
         unique.append(candidate)
     return unique
+
+
+def _revalidate_candidates(candidates: list[dict], *, owner_id: str, session_id: str,
+                           project_id: str | None) -> list[dict]:
+    """Let Qdrant suggest identities while Postgres authorizes their content."""
+    references = [
+        (str(item.get("evidence_id") or item.get("chunk_id")), int(item["binding_id"]))
+        for item in candidates
+        if (item.get("evidence_id") or item.get("chunk_id")) and item.get("binding_id") is not None
+    ]
+    authorized = repositories.evidence.revalidate_evidence(
+        references, owner_id=owner_id, session_id=session_id, project_id=project_id,
+    )
+    validated: list[dict] = []
+    seen_evidence: set[str] = set()
+    for candidate in candidates:
+        evidence_id = str(candidate.get("evidence_id") or candidate.get("chunk_id") or "")
+        binding_id = candidate.get("binding_id")
+        if not evidence_id or binding_id is None:
+            continue
+        row = authorized.get((evidence_id, int(binding_id)))
+        if row is None or evidence_id in seen_evidence:
+            continue
+        seen_evidence.add(evidence_id)
+        locator = row["locator_json"] or {}
+        modality = {"video": "video_segment", "audio": "audio_segment"}.get(row["modality"], row["modality"])
+        validated.append({
+            **candidate,
+            "evidence_id": evidence_id,
+            "chunk_id": evidence_id,
+            "binding_id": int(binding_id),
+            "doc_id": row["asset_id"],
+            "modality": modality,
+            "representation": row["representation"],
+            "content": row["content"] or "",
+            "source_name": row["source_name"],
+            "page": locator.get("page"),
+            "time_range": locator.get("time_range"),
+            "cell_range": locator.get("cell_range"),
+            "bbox": locator.get("bbox"),
+            "raw_file_uri": row["media_uri"],
+        })
+    return validated
 
 
 def _rerank_and_format(query: str, candidates: list[dict]) -> RetrievalResult:

@@ -184,4 +184,53 @@ def evidence_migrations() -> list[PostgresMigration]:
             locked_at TIMESTAMPTZ, locked_by TEXT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
             UNIQUE(evidence_id, target))""")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_evidence_projection_pending ON evidence_projection_jobs(status, updated_at)")
-    return [PostgresMigration(1, "assets_evidence_ingestion_and_outbox", initial)]
+
+    def scoped_bindings(cursor: Any) -> None:
+        """Make every durable evidence operation address one visibility binding.
+
+        The knowledge base is intentionally reset before this migration.  Refuse
+        to guess a scope for legacy rows: an operator must run the explicit
+        reset command instead.
+        """
+        for table in (
+            "evidence_projection_jobs", "ingestion_runs", "evidence_segments",
+            "asset_bindings", "assets",
+        ):
+            cursor.execute(f"SELECT EXISTS (SELECT 1 FROM {table} LIMIT 1) AS populated")
+            row = cursor.fetchone()
+            populated = row["populated"] if isinstance(row, dict) else row[0]
+            if populated:
+                raise RuntimeError(
+                    "Evidence migration 2 requires an empty knowledge base; "
+                    "run scripts/reset_knowledge_base.py before starting Raggy"
+                )
+
+        cursor.execute("ALTER TABLE asset_bindings DROP CONSTRAINT IF EXISTS asset_bindings_asset_id_owner_id_project_id_key")
+        cursor.execute("DROP INDEX IF EXISTS idx_asset_bindings_owner_project")
+        cursor.execute("ALTER TABLE asset_bindings DROP COLUMN IF EXISTS project_scope")
+        cursor.execute("ALTER TABLE asset_bindings ADD COLUMN scope TEXT NOT NULL")
+        cursor.execute("ALTER TABLE asset_bindings ADD COLUMN session_id TEXT")
+        cursor.execute("""ALTER TABLE asset_bindings ADD CONSTRAINT ck_asset_binding_scope
+            CHECK ((scope = 'session' AND session_id IS NOT NULL AND project_id IS NULL)
+                OR (scope = 'project' AND project_id IS NOT NULL AND session_id IS NULL))""")
+        cursor.execute("""ALTER TABLE asset_bindings ADD CONSTRAINT uq_asset_binding_scope
+            UNIQUE NULLS NOT DISTINCT(asset_id, owner_id, scope, session_id, project_id)""")
+        cursor.execute("CREATE INDEX idx_asset_bindings_owner_session ON asset_bindings(owner_id, session_id) WHERE scope = 'session'")
+        cursor.execute("CREATE INDEX idx_asset_bindings_owner_project_v2 ON asset_bindings(owner_id, project_id) WHERE scope = 'project'")
+
+        cursor.execute("ALTER TABLE ingestion_runs DROP COLUMN IF EXISTS project_scope")
+        cursor.execute("ALTER TABLE ingestion_runs DROP COLUMN IF EXISTS project_id")
+        cursor.execute("ALTER TABLE ingestion_runs DROP COLUMN IF EXISTS owner_id")
+        cursor.execute("ALTER TABLE ingestion_runs ADD COLUMN binding_id BIGINT NOT NULL REFERENCES asset_bindings(binding_id) ON DELETE CASCADE")
+        cursor.execute("CREATE INDEX idx_ingestion_runs_binding ON ingestion_runs(binding_id, created_at DESC)")
+
+        cursor.execute("ALTER TABLE evidence_projection_jobs DROP CONSTRAINT IF EXISTS evidence_projection_jobs_evidence_id_target_key")
+        cursor.execute("ALTER TABLE evidence_projection_jobs ADD COLUMN binding_id BIGINT NOT NULL REFERENCES asset_bindings(binding_id) ON DELETE CASCADE")
+        cursor.execute("""ALTER TABLE evidence_projection_jobs ADD CONSTRAINT uq_evidence_projection_binding
+            UNIQUE(evidence_id, binding_id, target)""")
+        cursor.execute("CREATE INDEX idx_evidence_projection_binding ON evidence_projection_jobs(binding_id, status, updated_at)")
+
+    return [
+        PostgresMigration(1, "assets_evidence_ingestion_and_outbox", initial),
+        PostgresMigration(2, "session_and_project_evidence_bindings", scoped_bindings),
+    ]

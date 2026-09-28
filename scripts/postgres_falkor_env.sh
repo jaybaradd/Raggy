@@ -29,7 +29,10 @@ export POSTGRES_SCHEMA="${POSTGRES_SCHEMA:-public}"
 export AUTHORITATIVE_DB_BACKEND=postgres
 
 export QDRANT_URL="${POSTGRES_QDRANT_URL:-./qdrant_postgres_data}"
-export QDRANT_COLLECTION="${POSTGRES_QDRANT_COLLECTION:-raggy_postgres_evidence}"
+export QDRANT_COLLECTION="${POSTGRES_QDRANT_COLLECTION:-raggy_postgres_evidence_v2}"
+export QDRANT_TABLE_COLLECTION="${POSTGRES_QDRANT_TABLE_COLLECTION:-raggy_postgres_tables_v2}"
+export QDRANT_IMAGE_COLLECTION="${POSTGRES_QDRANT_IMAGE_COLLECTION:-raggy_postgres_images_v2}"
+export QDRANT_VIDEO_COLLECTION="${POSTGRES_QDRANT_VIDEO_COLLECTION:-raggy_postgres_video_v2}"
 export MEMORY_COLLECTION="${POSTGRES_MEMORY_COLLECTION:-raggy_postgres_memories}"
 export UPLOAD_DIR="${POSTGRES_UPLOAD_DIR:-./uploaded_files_postgres}"
 # Used only by the explicit SQLite-graph rollback path; it must not share the

@@ -52,7 +52,7 @@ def _stream_request(base_url: str, path: str, payload: dict) -> tuple[int, str]:
         return response.status, response.read().decode("utf-8")
 
 
-def _multipart_upload(base_url: str, filename: str, content: bytes) -> tuple[int, dict]:
+def _multipart_upload(base_url: str, session_id: str, filename: str, content: bytes) -> tuple[int, dict]:
     boundary = f"raggy-e2e-{uuid.uuid4().hex}"
     body = b"".join((
         f"--{boundary}\r\n".encode(),
@@ -62,7 +62,7 @@ def _multipart_upload(base_url: str, filename: str, content: bytes) -> tuple[int
         f"\r\n--{boundary}--\r\n".encode(),
     ))
     request = Request(
-        f"{base_url}/api/documents", data=body, method="POST",
+        f"{base_url}/api/documents?session_id={session_id}&scope=project", data=body, method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
     with urlopen(request, timeout=30) as response:
@@ -151,10 +151,12 @@ class PostgresApiE2ETests(unittest.TestCase):
             self.process.stdout.close()
         self.process = None
 
-    def _wait_for_document(self, doc_id: str) -> dict:
+    def _wait_for_document(self, binding_id: int, session_id: str) -> dict:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            _, status = _json_request(self.base_url, "GET", f"/api/documents/{doc_id}/status")
+            _, status = _json_request(
+                self.base_url, "GET", f"/api/documents/bindings/{binding_id}/status?session_id={session_id}",
+            )
             if status["status"] in {"done", "failed"}:
                 return status
             time.sleep(0.5)
@@ -181,20 +183,26 @@ class PostgresApiE2ETests(unittest.TestCase):
         self.assertIn("Test reply", before_restart["messages"][1]["content"])
 
         status, document = _multipart_upload(
-            self.base_url, "arrivals.csv", b"shipment,arrival\nAC-42,Friday\n"
+            self.base_url, session["session_id"], "arrivals.csv", b"shipment,arrival\nAC-42,Friday\n"
         )
         self.assertEqual(status, 202)
-        document_status = self._wait_for_document(document["doc_id"])
+        document_status = self._wait_for_document(document["binding_id"], session["session_id"])
         self.assertEqual(document_status["status"], "done", document_status)
 
         self._stop_server()
         self._start_server()
         _, after_restart = _json_request(self.base_url, "GET", f"/api/sessions/{session['session_id']}/messages")
         self.assertEqual(after_restart["messages"], before_restart["messages"])
-        _, reloaded_document = _json_request(self.base_url, "GET", f"/api/documents/{document['doc_id']}/status")
+        _, reloaded_document = _json_request(
+            self.base_url, "GET",
+            f"/api/documents/bindings/{document['binding_id']}/status?session_id={session['session_id']}",
+        )
         self.assertEqual(reloaded_document["status"], "done")
         self.assertEqual(reloaded_document["chunk_count"], document_status["chunk_count"])
-        with urlopen(f"{self.base_url}/api/documents/{document['doc_id']}/source", timeout=30) as response:
+        with urlopen(
+            f"{self.base_url}/api/documents/bindings/{document['binding_id']}/source?session_id={session['session_id']}",
+            timeout=30,
+        ) as response:
             self.assertEqual(response.read(), b"shipment,arrival\nAC-42,Friday\n")
 
 

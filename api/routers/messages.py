@@ -125,7 +125,8 @@ async def send_message(
     inline = body.inline_context.strip()
     if body.use_knowledge_base:
         retrieval_result = await retrieve_with_decomposition(
-            query=body.content, provider=llm_client,
+            query=body.content, provider=llm_client, owner_id="default",
+            session_id=session_id, project_id=session.get("project_id"),
         )
     else:
         retrieval_result = RetrievalResult(context="", chunks=[])
@@ -272,6 +273,7 @@ async def send_message(
             "source_index": index,
             "evidence_id": chunk.get("evidence_id", chunk.get("chunk_id")),
             "doc_id": chunk.get("doc_id"),
+            "binding_id": chunk.get("binding_id"),
             "filename": chunk.get("source_name"),
             "modality": chunk.get("modality"),
             "representation": chunk.get("representation", "text"),
@@ -283,7 +285,7 @@ async def send_message(
             "source_url": (
                 chunk.get("raw_file_uri")
                 if str(chunk.get("raw_file_uri", "")).startswith("http")
-                else f"/api/documents/{chunk.get('doc_id')}/source"
+                else f"/api/documents/bindings/{chunk.get('binding_id')}/source?session_id={session_id}"
             ),
         }
         for index, chunk in enumerate(retrieval_result.chunks, start=1)

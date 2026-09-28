@@ -35,8 +35,8 @@ def _message_router_without_runtime_services():
     engine.RAG_SYSTEM_PROMPT = "test"
     engine.RetrievalResult = lambda context, chunks: types.SimpleNamespace(context=context, chunks=chunks)
     engine.build_rag_prompt = lambda content, _context: content
-    async def retrieve_with_decomposition(query, provider):
-        del query, provider
+    async def retrieve_with_decomposition(query, provider, **scope):
+        del query, provider, scope
         return engine.RetrievalResult("", [])
     engine.retrieve_with_decomposition = retrieve_with_decomposition
     memory_result = types.SimpleNamespace(
