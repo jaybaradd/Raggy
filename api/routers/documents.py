@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
@@ -17,6 +16,7 @@ from core.evidence.projections import sync_pending_evidence_projections
 from core.ingestion.chunker import chunk_parsed_chunks
 from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import compute_doc_id, get_parser
+from core.latency import elapsed_ms, latency_span, log_latency, now_ns
 from db.repository_factory import repositories
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def _run_projection_job(run_id: str, binding_id: int, chunk_count: int) ->
     try:
         result = await asyncio.to_thread(
             sync_pending_evidence_projections, store=evidence_store,
-            binding_id=binding_id, limit=max(chunk_count, 1),
+            binding_id=binding_id, limit=max(chunk_count, 1), run_id=run_id,
         )
         if result["failed"]:
             raise RuntimeError(f"Evidence projection failed for {result['failed']} chunk(s)")
@@ -67,7 +67,7 @@ async def _run_ingestion_job(file_path: Path | str, doc_id: str, binding_id: int
                              modality: str, filename: str, run_id: str) -> None:
     try:
         chunk_count = await asyncio.to_thread(
-            _ingest, file_path, doc_id, binding_id, modality, filename,
+            _ingest, file_path, doc_id, binding_id, modality, filename, run_id,
         )
     except Exception as exc:
         logger.exception("Ingestion failed for '%s'", filename)
@@ -128,24 +128,41 @@ async def upload_document(file: UploadFile, session_id: str = Query(...),
 
 @router.post("/parse", response_model=ParseDocumentResponse)
 async def parse_document(file: UploadFile) -> ParseDocumentResponse:
+    total_started = now_ns()
     filename = file.filename or "unknown"
     extension = Path(filename).suffix.lower()
     if extension not in _SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail=f"Unsupported file type '{extension}'")
     import tempfile
     content = await file.read()
+    doc_id = compute_doc_id(content)
     with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as temporary:
         temporary.write(content)
         path = Path(temporary.name)
     try:
-        chunks = get_parser(extension.lstrip(".")).parse(path, compute_doc_id(content))
+        common = {"doc_id": doc_id, "modality": extension.lstrip("."), "mode": "inline"}
+        with latency_span("ingestion", "parser_setup", **common):
+            parser = get_parser(extension.lstrip("."))
+        with latency_span("ingestion", "parse", **common) as fields:
+            chunks = parser.parse(path, doc_id)
+            fields["raw_block_count"] = len(chunks)
     except Exception as exc:
+        log_latency(
+            "ingestion", "total", elapsed_ms(total_started), outcome="error",
+            doc_id=doc_id, modality=extension.lstrip("."), mode="inline",
+            error_type=type(exc).__name__,
+        )
         logger.exception("Inline parsing failed for '%s'", filename)
         raise HTTPException(status_code=422, detail=f"Document parsing failed: {exc}") from exc
     finally:
         path.unlink(missing_ok=True)
-    return ParseDocumentResponse(filename=filename, modality=extension.lstrip("."),
-                                 parsed_text="\n\n".join(c.content for c in chunks if c.content.strip()))
+    parsed_text = "\n\n".join(c.content for c in chunks if c.content.strip())
+    log_latency(
+        "ingestion", "total", elapsed_ms(total_started), doc_id=doc_id,
+        modality=extension.lstrip("."), mode="inline", raw_block_count=len(chunks),
+        output_chars=len(parsed_text),
+    )
+    return ParseDocumentResponse(filename=filename, modality=extension.lstrip("."), parsed_text=parsed_text)
 
 
 @router.post("/youtube", response_model=UploadDocumentResponse, status_code=202)
@@ -236,17 +253,41 @@ def document_source(binding_id: int, session_id: str = Query(...)) -> FileRespon
     return FileResponse(source, filename=asset.filename)
 
 
-def _ingest(file_path: Path | str, doc_id: str, binding_id: int, modality: str, filename: str) -> int:
-    started = time.monotonic()
-    parsed = get_parser(modality).parse(file_path, doc_id)
-    logger.info("Parsed '%s' into %d raw blocks in %.2fs", filename, len(parsed), time.monotonic() - started)
-    chunks = chunk_parsed_chunks(parsed)
-    for chunk in chunks:
-        chunk.embedding_model = settings.local_embed_model
-        chunk.source_name = filename if modality == "youtube" else Path(filename).name
-    evidence_store.upsert_evidence([EvidenceSegment.from_chunk(chunk) for chunk in chunks], binding_id=binding_id)
-    result = sync_pending_evidence_projections(store=evidence_store, binding_id=binding_id, limit=max(len(chunks), 1))
-    if result["failed"]:
-        raise RuntimeError(f"Evidence projection failed for {result['failed']} chunk(s)")
-    logger.info("Ingested '%s' into %d chunks in %.2fs", filename, len(chunks), time.monotonic() - started)
+def _ingest(file_path: Path | str, doc_id: str, binding_id: int, modality: str,
+            filename: str, run_id: str | None = None) -> int:
+    total_started = now_ns()
+    common = {"run_id": run_id, "binding_id": binding_id, "doc_id": doc_id, "modality": modality}
+    try:
+        with latency_span("ingestion", "parser_setup", **common):
+            parser = get_parser(modality)
+        with latency_span("ingestion", "parse", **common) as fields:
+            parsed = parser.parse(file_path, doc_id)
+            fields["raw_block_count"] = len(parsed)
+        logger.info("Parsed '%s' into %d raw blocks", filename, len(parsed))
+        with latency_span("ingestion", "chunk", **common) as fields:
+            chunks = chunk_parsed_chunks(parsed)
+            for chunk in chunks:
+                chunk.embedding_model = settings.local_embed_model
+                chunk.source_name = filename if modality == "youtube" else Path(filename).name
+            fields["raw_block_count"] = len(parsed)
+            fields["chunk_count"] = len(chunks)
+        with latency_span("ingestion", "evidence_persist", **common, chunk_count=len(chunks)):
+            evidence_store.upsert_evidence(
+                [EvidenceSegment.from_chunk(chunk) for chunk in chunks], binding_id=binding_id,
+            )
+        with latency_span("ingestion", "projection", **common, chunk_count=len(chunks)) as fields:
+            result = sync_pending_evidence_projections(
+                store=evidence_store, binding_id=binding_id, limit=max(len(chunks), 1), run_id=run_id,
+            )
+            fields.update(result)
+        if result["failed"]:
+            raise RuntimeError(f"Evidence projection failed for {result['failed']} chunk(s)")
+    except Exception as exc:
+        log_latency(
+            "ingestion", "total", elapsed_ms(total_started), outcome="error",
+            error_type=type(exc).__name__, **common,
+        )
+        raise
+    log_latency("ingestion", "total", elapsed_ms(total_started), chunk_count=len(chunks), **common)
+    logger.info("Ingested '%s' into %d chunks", filename, len(chunks))
     return len(chunks)

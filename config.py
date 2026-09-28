@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
     pdf_ocr_enabled: bool = Field(default=False, alias="PDF_OCR_ENABLED")
     pdf_table_structure_enabled: bool = Field(default=False, alias="PDF_TABLE_STRUCTURE_ENABLED")
+    latency_log_path: str = Field(default="", alias="LATENCY_LOG_PATH")
 
 
 # Module-level singleton — import this object everywhere.

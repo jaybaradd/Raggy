@@ -195,6 +195,24 @@ podman compose start raggy-app
 
 The graph rebuild never changes Postgres or Qdrant.
 
+### Latency traces
+
+In Compose, ingestion, retrieval, and generation timings are written as JSON
+lines to `runtime_logs/latency.jsonl` and also emitted through the
+`raggy.latency` application logger. Each ingestion uses its `run_id`; each chat
+turn uses its `trace_id`.
+
+```bash
+# Follow timings live without the rest of the application log.
+podman compose logs -f raggy-app | rg 'raggy.latency'
+
+# Inspect the persistent host-mounted trace file.
+tail -n 100 runtime_logs/latency.jsonl
+
+# Select a single run or turn when jq is installed.
+jq -c 'select(.run_id == "RUN_ID" or .trace_id == "TRACE_ID")' runtime_logs/latency.jsonl
+```
+
 ## Testing
 
 Focused offline tests:

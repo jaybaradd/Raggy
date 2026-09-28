@@ -34,6 +34,7 @@ from core.memory.jobs import extract_turn_memories
 from core.memory.update_context import resolve_update_context
 from core.memory.planner import MemoryContextResult
 from core.memory.projection import memory_text
+from core.latency import elapsed_ms, log_latency, now_ns
 from db.repository_factory import repositories
 from core.retrieval.engine import (
     RAG_SYSTEM_PROMPT, RetrievalResult, build_rag_prompt, retrieve_with_decomposition,
@@ -99,6 +100,8 @@ async def send_message(
     5. Stream the LLM response token by token.
     6. Store the complete assistant reply after streaming finishes.
     """
+    request_started = now_ns()
+    started = now_ns()
     session = session_store.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -113,11 +116,16 @@ async def send_message(
         trace_id=trace_id,
     )
     history = session_store.get_messages(session_id)
+    log_latency("generation", "session_and_user_persist", elapsed_ms(started), trace_id=trace_id,
+                session_id=session_id, history_count=len(history))
+    started = now_ns()
     update_context = await resolve_update_context(
         user_content=body.content, messages=history[:-1], store=memory_store,
         provider=llm_client, owner_id="default", session_id=session_id,
         project_id=session.get("project_id"), project_scope=session.get("project_scope"),
     )
+    log_latency("generation", "update_context", elapsed_ms(started), trace_id=trace_id,
+                session_id=session_id)
 
     # 2. Build context
     #    If the user attached a file inline, its parsed text comes in as inline_context.
@@ -127,6 +135,7 @@ async def send_message(
         retrieval_result = await retrieve_with_decomposition(
             query=body.content, provider=llm_client, owner_id="default",
             session_id=session_id, project_id=session.get("project_id"),
+            trace_id=trace_id,
         )
     else:
         retrieval_result = RetrievalResult(context="", chunks=[])
@@ -144,6 +153,7 @@ async def send_message(
     # continuity context for the next turn.  Do not fall back to project-wide
     # semantic retrieval and let a different event replace that referent.
     # The update classifier controls response wording, not target identity.
+    started = now_ns()
     if update_context.extraction_target is not None:
         target = update_context.extraction_target
         memory = {
@@ -181,6 +191,8 @@ async def send_message(
             graph=graph_store,
             planner_provider=llm_client,
         )
+    log_latency("generation", "memory_context", elapsed_ms(started), trace_id=trace_id,
+                memory_count=len(memory_result.memories))
     if memory_result.context:
         memory_context = "CONFIRMED MEMORY CONTEXT\n" + memory_result.context
         combined_context = f"{combined_context}\n\n{memory_context}" if combined_context else memory_context
@@ -291,6 +303,12 @@ async def send_message(
         for index, chunk in enumerate(retrieval_result.chunks, start=1)
     ]
 
+    log_latency(
+        "generation", "pre_stream", elapsed_ms(request_started), trace_id=trace_id,
+        source_count=len(sources), memory_count=len(memory_result.memories),
+        inline_chars=len(inline),
+    )
+
     return StreamingResponse(
         _stream_response(
             session_id=session_id,
@@ -310,6 +328,7 @@ async def send_message(
             trace_id=trace_id,
             extraction_target=update_context.extraction_target,
             recent_messages=update_context.recent_messages,
+            request_started_ns=request_started,
         ),
         media_type="text/event-stream",
         headers={
@@ -332,11 +351,14 @@ async def _stream_response(
     trace_id: str,
     extraction_target,
     recent_messages: list[dict[str, str]],
+    request_started_ns: int,
 ):
     """
     Generator that yields SSE-formatted tokens and accumulates the full reply.
     """
     full_reply: list[str] = []
+    stream_started = now_ns()
+    first_token_seen = False
 
     try:
         # Send structured provenance before token generation. Existing clients
@@ -347,11 +369,22 @@ async def _stream_response(
             messages=messages,
             system_prompt=RAG_SYSTEM_PROMPT,
         ):
+            if not first_token_seen:
+                log_latency("generation", "time_to_first_token", elapsed_ms(stream_started), trace_id=trace_id)
+                first_token_seen = True
             full_reply.append(token)
             # SSE format: "data: <payload>\n\n"
             yield f"data: {json.dumps(token)}\n\n"
 
     except Exception as exc:
+        log_latency(
+            "generation", "stream", elapsed_ms(stream_started), outcome="error",
+            trace_id=trace_id, error_type=type(exc).__name__, chunk_count=len(full_reply),
+        )
+        log_latency(
+            "generation", "request_total", elapsed_ms(request_started_ns), outcome="error",
+            trace_id=trace_id, error_type=type(exc).__name__,
+        )
         logger.exception("Error during LLM stream for session %s", session_id)
         error_payload = json.dumps({"error": str(exc)})
         yield f"data: {error_payload}\n\n"
@@ -359,9 +392,17 @@ async def _stream_response(
 
     # Persist the complete assistant reply
     complete_reply = "".join(full_reply)
+    if not first_token_seen:
+        log_latency("generation", "time_to_first_token", elapsed_ms(stream_started), outcome="empty",
+                    trace_id=trace_id)
+    log_latency("generation", "stream", elapsed_ms(stream_started), trace_id=trace_id,
+                chunk_count=len(full_reply), response_chars=len(complete_reply))
+    persist_started = now_ns()
     assistant_turn_id = session_store.append_message(
         session_id, role="assistant", content=complete_reply, trace_id=trace_id,
     )
+    log_latency("generation", "assistant_persist", elapsed_ms(persist_started), trace_id=trace_id,
+                response_chars=len(complete_reply))
     evidence_refs = [source["evidence_id"] for source in sources if source.get("evidence_id")]
     asyncio.create_task(extract_turn_memories(
         store=memory_store,
@@ -385,4 +426,6 @@ async def _stream_response(
     yield f"event: memory_processing\ndata: {json.dumps({'type': 'memory_processing', 'source_turn_id': assistant_turn_id})}\n\n"
 
     # Signal end of stream
+    log_latency("generation", "request_total", elapsed_ms(request_started_ns), trace_id=trace_id,
+                source_count=len(sources), response_chars=len(complete_reply))
     yield "data: [DONE]\n\n"

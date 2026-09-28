@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from config import settings
 from core.embeddings import embedder
+from core.latency import elapsed_ms, log_latency, now_ns
 from core.retrieval.reranker import reranker
 from core.storage.qdrant_store import qdrant_store
 from db.repository_factory import repositories
@@ -61,6 +62,7 @@ def retrieve(
     project_id: str | None,
     top_k: int | None = None,
     doc_id_filter: str | None = None,
+    trace_id: str | None = None,
 ) -> RetrievalResult:
     """
     Run the Phase 1 hybrid retrieval + reranking pipeline for *query*.
@@ -75,12 +77,22 @@ def retrieve(
     -------
     RetrievalResult with the formatted context string and reranked chunk list.
     """
+    total_started = now_ns()
     candidates = _retrieve_candidates(
         query, owner_id=owner_id, session_id=session_id, project_id=project_id,
-        top_k=top_k, doc_id_filter=doc_id_filter,
+        top_k=top_k, doc_id_filter=doc_id_filter, trace_id=trace_id,
     )
+    started = now_ns()
     candidates = _revalidate_candidates(candidates, owner_id=owner_id, session_id=session_id, project_id=project_id)
-    return _rerank_and_format(query, candidates)
+    log_latency("retrieval", "postgres_revalidation", elapsed_ms(started), trace_id=trace_id,
+                candidate_count=len(candidates))
+    started = now_ns()
+    result = _rerank_and_format(query, candidates)
+    log_latency("retrieval", "rerank_and_format", elapsed_ms(started), trace_id=trace_id,
+                result_count=len(result.chunks))
+    log_latency("retrieval", "total", elapsed_ms(total_started), trace_id=trace_id,
+                result_count=len(result.chunks))
+    return result
 
 
 async def retrieve_with_decomposition(
@@ -92,31 +104,49 @@ async def retrieve_with_decomposition(
     project_id: str | None,
     top_k: int | None = None,
     doc_id_filter: str | None = None,
+    trace_id: str | None = None,
 ) -> RetrievalResult:
     """Retrieve one or more bounded subqueries and rerank their union once."""
     from core.retrieval.decomposition import decompose_query
 
+    total_started = now_ns()
+    started = now_ns()
     subqueries = await decompose_query(query, provider)
+    log_latency("retrieval", "query_decomposition", elapsed_ms(started), trace_id=trace_id,
+                subquery_count=len(subqueries))
     candidates = _deduplicate_candidates([
         candidate
         for subquery in subqueries
         for candidate in _retrieve_candidates(
             subquery, owner_id=owner_id, session_id=session_id, project_id=project_id,
-            top_k=top_k, doc_id_filter=doc_id_filter,
+            top_k=top_k, doc_id_filter=doc_id_filter, trace_id=trace_id,
         )
     ])
+    started = now_ns()
     candidates = _revalidate_candidates(candidates, owner_id=owner_id, session_id=session_id, project_id=project_id)
-    return _rerank_and_format(query, candidates)
+    log_latency("retrieval", "postgres_revalidation", elapsed_ms(started), trace_id=trace_id,
+                candidate_count=len(candidates))
+    started = now_ns()
+    result = _rerank_and_format(query, candidates)
+    log_latency("retrieval", "rerank_and_format", elapsed_ms(started), trace_id=trace_id,
+                result_count=len(result.chunks))
+    log_latency("retrieval", "total", elapsed_ms(total_started), trace_id=trace_id,
+                subquery_count=len(subqueries), result_count=len(result.chunks))
+    return result
 
 
 def _retrieve_candidates(
     query: str, *, owner_id: str, session_id: str, project_id: str | None,
     top_k: int | None = None, doc_id_filter: str | None = None,
+    trace_id: str | None = None,
 ) -> list[dict]:
     """Run hybrid retrieval only; callers choose the final reranking strategy."""
     clean_q = _clean_query(query)
+    started = now_ns()
     query_vector = embedder.encode_query(clean_q)
-    return qdrant_store.search_all(
+    log_latency("retrieval", "query_embedding", elapsed_ms(started), trace_id=trace_id)
+    started = now_ns()
+    results = qdrant_store.search_all(
         query_vector=query_vector,
         query_text=clean_q,
         owner_id=owner_id,
@@ -125,6 +155,9 @@ def _retrieve_candidates(
         top_k=top_k or settings.hybrid_candidates,
         doc_id_filter=doc_id_filter,
     )
+    log_latency("retrieval", "qdrant_hybrid_search", elapsed_ms(started), trace_id=trace_id,
+                candidate_count=len(results))
+    return results
 
 
 def _deduplicate_candidates(candidates: list[dict]) -> list[dict]:

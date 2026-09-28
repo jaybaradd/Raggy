@@ -22,11 +22,13 @@ services:
       HF_HOME: /models/huggingface
       XDG_CACHE_HOME: /models/cache
       FASTEMBED_CACHE_PATH: /models/fastembed
+      LATENCY_LOG_PATH: /data/latency/latency.jsonl
     ports:
       - "127.0.0.1:${RAGGY_APP_PORT:-8000}:8000"
     volumes:
       - raggy-uploads:/data/uploads
       - raggy-model-cache:/models
+      - ./runtime_logs:/data/latency
     depends_on:
       postgres:
         condition: service_healthy

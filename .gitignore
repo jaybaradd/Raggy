@@ -15,3 +15,4 @@ raggy_graph_postgres.sqlite3-wal
 qdrant_data/
 qdrant_postgres_data/
 uploaded_files_postgres/
+runtime_logs/
