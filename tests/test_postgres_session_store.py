@@ -2,7 +2,6 @@
 
 Run against the local Podman service with RUN_POSTGRES_INTEGRATION_TESTS=1.
 """
-from __future__ import annotations
 
 import importlib.util
 import os

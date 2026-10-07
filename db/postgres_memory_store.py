@@ -3,7 +3,6 @@
 The relational record, lifecycle state, audit trail, and outbox are committed
 together. Vector and graph stores consume the outbox as rebuildable projections.
 """
-from __future__ import annotations
 
 import json
 import re

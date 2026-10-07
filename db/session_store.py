@@ -5,7 +5,6 @@ will move to Postgres. Sessions and messages are authoritative conversation
 history; memory remains a separate, derived lifecycle system.
 """
 
-from __future__ import annotations
 
 import json
 import sqlite3

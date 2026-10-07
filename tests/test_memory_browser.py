@@ -1,6 +1,5 @@
 """Repository coverage for browser inspection and soft-forget lifecycle."""
 
-from __future__ import annotations
 
 import tempfile
 import unittest

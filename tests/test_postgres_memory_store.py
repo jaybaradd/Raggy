@@ -1,5 +1,4 @@
 """Opt-in PostgreSQL integration coverage for memory lifecycle and outbox work."""
-from __future__ import annotations
 
 import importlib.util
 import os

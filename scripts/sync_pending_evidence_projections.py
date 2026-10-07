@@ -1,5 +1,4 @@
 """Process durable evidence-to-Qdrant projection jobs."""
-from __future__ import annotations
 import argparse
 from db.postgres_evidence_store import PostgresEvidenceRepository
 from config import settings

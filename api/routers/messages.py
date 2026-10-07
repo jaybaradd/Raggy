@@ -17,7 +17,6 @@ Final event signals completion:
 The frontend reads this with EventSource or fetch + ReadableStream.
 """
 
-from __future__ import annotations
 
 import json
 import logging

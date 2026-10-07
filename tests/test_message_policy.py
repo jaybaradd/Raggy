@@ -1,6 +1,5 @@
 """Message-level retrieval controls should default to context-safe behavior."""
 
-from __future__ import annotations
 
 import unittest
 

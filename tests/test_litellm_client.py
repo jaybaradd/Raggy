@@ -1,6 +1,5 @@
 """Unit tests for Raggy's narrow LiteLLM boundary."""
 
-from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest

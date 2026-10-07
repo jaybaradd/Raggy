@@ -1,6 +1,5 @@
 """Conservative query decomposition for compound document retrieval."""
 
-from __future__ import annotations
 
 from typing import Any
 

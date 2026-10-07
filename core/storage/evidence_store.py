@@ -5,7 +5,6 @@ single-user prototype. The interface is shaped so it can be backed by Postgres
 later without changing parser or retrieval code.
 """
 
-from __future__ import annotations
 
 import json
 import sqlite3

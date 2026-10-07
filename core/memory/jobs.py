@@ -1,6 +1,5 @@
 """Background jobs for extracting candidate memories after chat turns."""
 
-from __future__ import annotations
 
 import asyncio
 import logging

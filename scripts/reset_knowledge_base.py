@@ -1,5 +1,4 @@
 """Explicitly reset Raggy's evidence subsystem without touching conversations or memory."""
-from __future__ import annotations
 
 import argparse
 import shutil

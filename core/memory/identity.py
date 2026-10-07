@@ -1,6 +1,5 @@
 """Stable duplicate fingerprints and generic event comparison helpers."""
 
-from __future__ import annotations
 
 import hashlib
 import re

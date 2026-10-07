@@ -1,6 +1,5 @@
 """Tests for explicit rebuild of the derived graph without touching Qdrant."""
 
-from __future__ import annotations
 
 import tempfile
 import unittest

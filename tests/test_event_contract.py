@@ -1,5 +1,4 @@
 """Generalist event-memory contract and capture-policy coverage."""
-from __future__ import annotations
 
 import unittest
 

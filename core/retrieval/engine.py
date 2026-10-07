@@ -15,7 +15,6 @@ Phase 3 can add a bounded decomposition pass before step 1, then globally
 reranks its merged evidence against the original question.
 """
 
-from __future__ import annotations
 
 import logging
 from dataclasses import dataclass

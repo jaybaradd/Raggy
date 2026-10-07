@@ -1,6 +1,5 @@
 """Deterministic memory-to-text projection for semantic retrieval."""
 
-from __future__ import annotations
 
 from core.memory.models import MemoryRecord
 

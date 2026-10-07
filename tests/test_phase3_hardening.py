@@ -1,6 +1,5 @@
 """Fast, deterministic regression coverage for Phase 3 hardening contracts."""
 
-from __future__ import annotations
 
 import tempfile
 import unittest

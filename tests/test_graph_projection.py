@@ -1,6 +1,5 @@
 """Regression tests for the conservative, rebuildable memory graph model."""
 
-from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json

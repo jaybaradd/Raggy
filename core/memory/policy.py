@@ -4,7 +4,6 @@ The extractor proposes typed candidates. This module, rather than the model,
 decides whether a candidate becomes durable project memory.
 """
 
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass

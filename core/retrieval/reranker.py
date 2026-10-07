@@ -20,7 +20,6 @@ Model: cross-encoder/ms-marco-MiniLM-L-6-v2
   because only the relative order matters.
 """
 
-from __future__ import annotations
 
 import logging
 

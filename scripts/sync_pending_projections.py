@@ -5,7 +5,6 @@ Run while the app is stopped when using file-backed local Qdrant:
     python scripts/sync_pending_projections.py --retry-failed
 """
 
-from __future__ import annotations
 
 import argparse
 import sys

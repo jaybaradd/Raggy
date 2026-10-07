@@ -4,7 +4,6 @@ core/ingestion/parser.py — Parser abstraction + all modality parsers.
 Each parser produces a list[ParsedChunk]. Everything downstream is modality-agnostic.
 """
 
-from __future__ import annotations
 
 import hashlib
 import logging
@@ -67,8 +66,9 @@ def _make_chunk(
     raw_file_uri: str,
     backend: str,
     representation: Literal["text", "ocr", "caption", "transcript", "frame", "layout"] = "text",
+    stable_key: str | None = None,
 ) -> ParsedChunk:
-    chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{index}"))
+    chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{stable_key or index}"))
     return ParsedChunk(
         chunk_id=chunk_id,
         doc_id=doc_id,
@@ -79,33 +79,50 @@ def _make_chunk(
         parser_backend=backend,
         evidence_id=chunk_id,
         representation=representation,
-        )
+    )
 
 
 # ── PDF Parser ────────────────────────────────────────────────────────────────
 
 class PdfParser(Parser):
-    """PDF via Docling. Produces section-aware text chunks."""
+    """Native/OCR PDF routing with the existing Docling parser as fallback."""
 
     BACKEND = "docling-pdf"
 
     def __init__(self) -> None:
         from config import settings
+
+        self._settings = settings
+        self._converter = None
+
+    def _get_converter(self):
+        """Construct Docling only when the fast path decides it is necessary."""
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
 
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = settings.pdf_ocr_enabled
-        pipeline_options.do_table_structure = settings.pdf_table_structure_enabled
-        self._converter = DocumentConverter(format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-        })
+        pipeline_options.do_ocr = self._settings.pdf_ocr_enabled
+        pipeline_options.do_table_structure = self._settings.pdf_table_structure_enabled
+        self._converter = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+        return self._converter
 
     def parse(self, file_path: Path | str, doc_id: str) -> list[ParsedChunk]:
-        result = self._converter.convert(str(file_path))
+        path = Path(file_path)
+        if self._settings.pdf_native_routing_enabled:
+            from core.ingestion.pdf_routing import parse_pdf_fast
+
+            chunks, fallback_reason = parse_pdf_fast(path, doc_id, self._settings)
+            if chunks is not None:
+                return chunks
+            logger.info("PDF fast path selected Docling fallback: %s", fallback_reason)
+
+        converter = self._converter or self._get_converter()
+        result = converter.convert(str(path))
         doc = result.document
-        raw_file_uri = file_path.resolve().as_uri()
+        raw_file_uri = path.resolve().as_uri()
         chunks: list[ParsedChunk] = []
 
         top_section: str = ""
@@ -113,6 +130,7 @@ class PdfParser(Parser):
         current_lines: list[str] = []
         current_page: int | None = None
         block_idx = 0
+        page_block_counts: dict[int, int] = {}
 
         def _flush():
             nonlocal block_idx, current_lines, current_page
@@ -123,13 +141,17 @@ class PdfParser(Parser):
             else:
                 sec_path = top_section or current_section
             prefix = f"[Section: {sec_path}]\n" if sec_path else ""
+            page_key = current_page or 0
+            page_block_idx = page_block_counts.get(page_key, 0)
             chunks.append(_make_chunk(
                 doc_id, block_idx,
                 prefix + "\n".join(current_lines),
                 "text",
                 SourceLocator(page=current_page),
                 raw_file_uri, self.BACKEND,
+                stable_key=f"pdf:docling:{page_key}:{page_block_idx}",
             ))
+            page_block_counts[page_key] = page_block_idx + 1
             block_idx += 1
             current_lines.clear()
 
@@ -149,6 +171,10 @@ class PdfParser(Parser):
                 if hasattr(prov, "page_no"):
                     page_no = prov.page_no
             if current_page is None:
+                current_page = page_no
+            elif page_no is not None and page_no != current_page:
+                if current_lines:
+                    _flush()
                 current_page = page_no
 
             if item_type == "SectionHeaderItem":

@@ -13,7 +13,6 @@ the same BPE vocabulary as OpenAI/Gemini embedding models (close enough for
 budget purposes).  sentence-transformers' tokenizer is slower for this task.
 """
 
-from __future__ import annotations
 
 import re
 import uuid

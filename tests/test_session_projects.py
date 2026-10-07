@@ -1,6 +1,5 @@
 """Durable session and project assignment behaviour."""
 
-from __future__ import annotations
 
 import tempfile
 import unittest

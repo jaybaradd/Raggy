@@ -1,6 +1,5 @@
 """Periodic lifecycle worker for time-bound durable memories."""
 
-from __future__ import annotations
 
 import asyncio
 import logging

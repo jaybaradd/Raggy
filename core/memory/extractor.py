@@ -1,6 +1,5 @@
 """Structured, provider-backed candidate memory extraction."""
 
-from __future__ import annotations
 
 import json
 import logging

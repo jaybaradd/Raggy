@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     table_chunk_rows: int = Field(default=50, alias="TABLE_CHUNK_ROWS")
     pdf_ocr_enabled: bool = Field(default=False, alias="PDF_OCR_ENABLED")
     pdf_table_structure_enabled: bool = Field(default=False, alias="PDF_TABLE_STRUCTURE_ENABLED")
+    pdf_native_routing_enabled: bool = Field(default=True, alias="PDF_NATIVE_ROUTING_ENABLED")
+    pdf_native_min_chars: int = Field(default=80, ge=1, alias="PDF_NATIVE_MIN_CHARS")
+    pdf_docling_fallback_page_ratio: float = Field(
+        default=0.70, ge=0.0, le=1.0, alias="PDF_DOCLING_FALLBACK_PAGE_RATIO"
+    )
+    pdf_ocr_render_dpi: int = Field(default=200, ge=72, le=400, alias="PDF_OCR_RENDER_DPI")
     latency_log_path: str = Field(default="", alias="LATENCY_LOG_PATH")
 
 

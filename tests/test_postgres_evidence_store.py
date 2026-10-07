@@ -1,5 +1,4 @@
 """Opt-in PostgreSQL tests for immutable assets, evidence, and ingestion state."""
-from __future__ import annotations
 import importlib.util, os, re, unittest, uuid
 from core.ingestion.models import AssetRecord, EvidenceSegment
 from core.ingestion.parser import SourceLocator

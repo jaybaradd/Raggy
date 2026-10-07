@@ -1,5 +1,4 @@
 """Backend-neutral repository contracts for authoritative Raggy data."""
-from __future__ import annotations
 
 from typing import Any, Protocol
 

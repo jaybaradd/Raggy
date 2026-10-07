@@ -1,5 +1,4 @@
 """Exact, scope-safe identifier candidate lookup for memory reconciliation."""
-from __future__ import annotations
 
 import tempfile
 import unittest

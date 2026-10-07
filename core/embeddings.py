@@ -5,7 +5,6 @@ Always uses local sentence-transformers (default: all-MiniLM-L6-v2, 384 dimensio
 No external API calls required for embeddings.
 """
 
-from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod

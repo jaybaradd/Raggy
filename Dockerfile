@@ -14,6 +14,14 @@ COPY requirements.txt ./
 # timeout so a slow PyPI transfer does not discard an otherwise valid build.
 RUN pip install --no-cache-dir --retries 5 --timeout 180 -r requirements.txt
 
+# Docling already brings PDFium and the project already uses RapidOCR. Pin only
+# these lightweight APIs in a separate layer so PDF routing stays reproducible
+# without invalidating or re-resolving the expensive ML requirements layer.
+RUN pip install --no-cache-dir --no-deps \
+        "pypdfium2==4.30.0" \
+        "rapidocr-onnxruntime==1.4.4" \
+    && python -c "from importlib.metadata import version; assert version('pypdfium2') == '4.30.0'; assert version('rapidocr-onnxruntime') == '1.4.4'"
+
 # Docling imports OpenCV for PDF table/layout processing. The slim Python
 # image does not include OpenCV's shared-library runtime.
 RUN apt-get update \

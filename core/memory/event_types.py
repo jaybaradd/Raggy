@@ -4,7 +4,6 @@ Event labels are useful retrieval and display metadata, but they are not a
 closed taxonomy and must not decide whether an operational memory is valid.
 """
 
-from __future__ import annotations
 
 import re
 

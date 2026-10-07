@@ -1,6 +1,5 @@
 """Backend-neutral, conservative graph projection models for durable memories."""
 
-from __future__ import annotations
 
 import json
 from dataclasses import dataclass

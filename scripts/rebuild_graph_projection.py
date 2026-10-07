@@ -4,7 +4,6 @@ Run while the application and other projection workers are stopped:
     python scripts/rebuild_graph_projection.py
 """
 
-from __future__ import annotations
 
 import argparse
 import sys

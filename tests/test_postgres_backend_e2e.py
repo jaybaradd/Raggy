@@ -1,5 +1,4 @@
 """Opt-in fresh-Postgres authority test without external LLM dependencies."""
-from __future__ import annotations
 import importlib.util, os, re, tempfile, unittest, uuid
 from pathlib import Path
 from core.ingestion.models import AssetRecord, EvidenceSegment

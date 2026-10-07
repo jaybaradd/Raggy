@@ -1,5 +1,4 @@
 """Repository backend selection is explicit and safe."""
-from __future__ import annotations
 
 import unittest
 from unittest.mock import patch

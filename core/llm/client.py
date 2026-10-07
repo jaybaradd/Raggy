@@ -1,6 +1,5 @@
 """Small in-process LiteLLM client used by chat and memory services."""
 
-from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable

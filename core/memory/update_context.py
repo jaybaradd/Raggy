@@ -1,6 +1,5 @@
 """Resolve safe conversational targets for proposed event updates."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 import logging

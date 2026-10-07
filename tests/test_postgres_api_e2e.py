@@ -4,7 +4,6 @@ Run with ``RUN_POSTGRES_API_E2E=1`` and ``POSTGRES_DATABASE_URL`` set.  It
 creates an isolated Postgres schema plus temporary upload, graph, and Qdrant
 directories; it never reads or writes the developer's normal application data.
 """
-from __future__ import annotations
 
 import importlib.util
 import json
