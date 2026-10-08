@@ -353,22 +353,49 @@ function renderSessionList(sessions) {
     groups.get(project).push(session);
   });
 
+  let openedFallbackGroup = false;
   [...groups.entries()]
     .sort(([a], [b]) => (a || 'zzzz').localeCompare(b || 'zzzz'))
     .forEach(([project, projectSessions]) => {
-      const heading = document.createElement('div');
+      const group = document.createElement('details');
+      group.className = 'session-group';
+      const containsActive = projectSessions.some(session => session.session_id === currentSessionId);
+      group.open = containsActive || (!currentSessionId && !openedFallbackGroup);
+      if (group.open) openedFallbackGroup = true;
+
+      const heading = document.createElement('summary');
       heading.className = 'project-group-heading';
-      heading.textContent = project ? `Project · ${project}` : 'Personal chats';
-      sessionList.appendChild(heading);
+      const projectName = document.createElement('span');
+      projectName.className = 'project-group-name';
+      projectName.textContent = project || 'Personal chats';
+      const count = document.createElement('span');
+      count.className = 'project-group-count';
+      count.textContent = projectSessions.length;
+      heading.append(projectName, count);
+      group.appendChild(heading);
+
+      const items = document.createElement('div');
+      items.className = 'session-group-items';
 
       projectSessions.forEach(session => {
-        const el = document.createElement('div');
+        const el = document.createElement('button');
+        el.type = 'button';
         el.className = 'session-item' + (session.session_id === currentSessionId ? ' active' : '');
-        el.textContent = session.title;
+        if (session.session_id === currentSessionId) el.setAttribute('aria-current', 'page');
+        const marker = document.createElement('span');
+        marker.className = 'session-item-marker';
+        marker.setAttribute('aria-hidden', 'true');
+        const title = document.createElement('span');
+        title.className = 'session-item-title';
+        title.textContent = session.title === 'New chat' ? 'Untitled conversation' : session.title;
+        el.title = title.textContent;
+        el.append(marker, title);
         el.dataset.id = session.session_id;
         el.addEventListener('click', () => switchSession(session.session_id, session.title, session.project_scope, session.project_id));
-        sessionList.appendChild(el);
+        items.appendChild(el);
       });
+      group.appendChild(items);
+      sessionList.appendChild(group);
     });
 }
 
@@ -501,13 +528,17 @@ async function sendMessage() {
   if (emptyState) emptyState.style.display = 'none';
 
   const botBubble = appendBubble('bot', '');
+  const botContent = getBubbleContent(botBubble);
+  const requestSessionId = currentSessionId;
+  const requestProjectScope = projectScopeInput.value.trim();
   const requestStartedAt = Date.now();
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
-  botBubble.appendChild(cursor);
+  botContent.appendChild(cursor);
+  let markdownRenderFrame = null;
 
   try {
-    const res = await fetch(`${API}/api/sessions/${currentSessionId}/messages`, {
+    const res = await fetch(`${API}/api/sessions/${requestSessionId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -520,7 +551,7 @@ async function sendMessage() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-      botBubble.textContent = `⚠ Error: ${err.detail}`;
+      setBubblePlainText(botBubble, `⚠ Error: ${err.detail}`);
       return;
     }
 
@@ -544,6 +575,14 @@ async function sendMessage() {
         if (payload === '[DONE]') break;
         try {
           const parsed = JSON.parse(payload);
+          if (parsed && parsed.type === 'session') {
+            if (currentSessionId === requestSessionId) {
+              const title = parsed.title || 'Untitled conversation';
+              chatTitle.textContent = requestProjectScope ? `${title} · ${requestProjectScope}` : title;
+              void loadSessions();
+            }
+            continue;
+          }
           if (parsed && parsed.type === 'sources') {
             sourceMetadata = parsed.sources || [];
             continue;
@@ -556,24 +595,37 @@ async function sendMessage() {
             memoryProcessingTurnId = parsed.source_turn_id || null;
             continue;
           }
-          if (parsed && parsed.error) { botBubble.textContent = `⚠ Error: ${parsed.error}`; return; }
+          if (parsed && parsed.error) {
+            if (markdownRenderFrame !== null) cancelAnimationFrame(markdownRenderFrame);
+            setBubblePlainText(botBubble, `⚠ Error: ${parsed.error}`);
+            return;
+          }
           const token = typeof parsed === 'string' ? parsed : (parsed.token || '');
           botText += token;
-          botBubble.textContent = botText;
-          botBubble.appendChild(cursor);
-          scrollToBottom();
+          if (markdownRenderFrame === null) {
+            markdownRenderFrame = requestAnimationFrame(() => {
+              markdownRenderFrame = null;
+              renderMarkdown(botContent, botText);
+              botContent.appendChild(cursor);
+              scrollToBottom();
+            });
+          }
         } catch (_) { /* non-JSON line */ }
       }
     }
-    cursor.remove();
+    if (markdownRenderFrame !== null) {
+      cancelAnimationFrame(markdownRenderFrame);
+      markdownRenderFrame = null;
+    }
+    renderMarkdown(botContent, botText);
     renderSources(botBubble, sourceMetadata);
     renderMemories(botBubble, memoryMetadata);
     if (memoryProcessingTurnId) renderMemoryProcessingStatus(botBubble, memoryProcessingTurnId);
     scrollToBottom();
 
   } catch (err) {
-    cursor.remove();
-    botBubble.textContent = `⚠ Network error: ${err.message}`;
+    if (markdownRenderFrame !== null) cancelAnimationFrame(markdownRenderFrame);
+    setBubblePlainText(botBubble, `⚠ Network error: ${err.message}`);
   } finally {
     isStreaming = false;
     updateSendBtn();
@@ -882,13 +934,26 @@ function appendBubble(role, text, attachments = []) {
   avatar.textContent = role === 'user' ? 'U' : '⬡';
   const bubble = document.createElement('div');
   bubble.className = `bubble ${role}`;
-  bubble.textContent = text;
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  if (role === 'bot') renderMarkdown(content, text);
+  else content.textContent = text;
+  bubble.appendChild(content);
   renderAttachmentChips(bubble, attachments);
   row.appendChild(avatar);
   row.appendChild(bubble);
   messageThread.appendChild(row);
   scrollToBottom();
   return bubble;
+}
+
+function getBubbleContent(bubble) {
+  return bubble.querySelector('.message-content');
+}
+
+function setBubblePlainText(bubble, text) {
+  const content = getBubbleContent(bubble);
+  content.textContent = text;
 }
 
 function clearThread() {

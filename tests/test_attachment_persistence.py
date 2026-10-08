@@ -76,11 +76,26 @@ class AttachmentMetadataTests(unittest.TestCase):
             request = SendMessageRequest(content="Summarise this", attachments=[ATTACHMENT])
 
             router = _message_router_without_runtime_services()
-            with patch.object(router, "session_store", store):
-                asyncio.run(router.send_message(session["session_id"], request))
+            class TitleProvider:
+                async def generate_json(self, prompt: str):
+                    self.prompt = prompt
+                    return {"title": "Document review"}
+
+            async def send_and_read_title_event():
+                with patch.object(router, "session_store", store), \
+                     patch.object(router, "llm_client", TitleProvider()):
+                    response = await router.send_message(session["session_id"], request)
+                    first_event = await anext(response.body_iterator)
+                    await response.body_iterator.aclose()
+                    return first_event
+
+            first_event = asyncio.run(send_and_read_title_event())
 
             persisted = store.get_messages(session["session_id"])
             self.assertEqual(persisted[0]["attachments"], [ATTACHMENT])
+            self.assertEqual(store.get_session(session["session_id"])["title"], "Document review")
+            self.assertIn('"type": "session"', first_event)
+            self.assertIn('"title": "Document review"', first_event)
 
     def test_metadata_survives_repository_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -96,7 +96,7 @@ class EventClaim(BaseModel):
 
 
 class EventMemory(BaseModel):
-    """A user-stated, time-bound project event such as a shipment or deadline."""
+    """A user-stated occurrence or state change with durable operational relevance."""
 
     model_config = ConfigDict(extra="forbid")
     event_type: str = Field(min_length=1, max_length=500)
@@ -127,6 +127,7 @@ MemoryPayload = Union[KnowledgeAtom, PreferenceMemory, SolutionMemory, EntityMem
 class MemoryRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     memory_id: str = Field(default_factory=lambda: str(uuid4()))
+    subject_id: str | None = None
     owner_id: str = "default"
     scope: MemoryScope = "session"
     session_id: str | None = None

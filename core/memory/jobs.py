@@ -7,6 +7,7 @@ import logging
 
 from core.memory.extractor import MemoryExtractor
 from core.memory.context_association import associate_selected_context
+from core.memory.commands import propose_event_claim_change
 from core.memory.identity import event_differences
 from core.memory.models import MemoryRecord
 from core.memory.policy import decide_project_capture
@@ -128,7 +129,7 @@ async def _reconcile_event(*, store, record: MemoryRecord, provider, policy_reas
         decision = ReconciliationDecision(
             outcome="update", existing_memory_id=update_target.memory_id,
             changed_claims=event_differences(update_target, record), confidence=1.0,
-            reason="Single event injected for the immediately preceding assistant response.",
+            reason="Single event selected by the current-turn scoped memory resolver.",
         )
     elif not candidates:
         decision = ReconciliationDecision(
@@ -148,10 +149,26 @@ async def _reconcile_event(*, store, record: MemoryRecord, provider, policy_reas
                     reason="Reconciliation planner was unavailable; retained for review.",
                 )
     details = {"policy_reason": policy_reason, **reconciliation_details(decision, record)}
-    store.apply_event_reconciliation(
-        record, outcome=decision.outcome, existing_memory_id=decision.existing_memory_id,
-        details=details, actor_id="system",
-    )
+    if decision.outcome == "update":
+        propose_event_claim_change(
+            store=store,
+            incoming=record,
+            target_memory_id=decision.existing_memory_id or "",
+            owner_id=record.owner_id,
+            session_id=record.session_id or "",
+            project_id=record.project_id,
+            project_scope=record.project_scope,
+            actor_id="system",
+            confidence=decision.confidence,
+            reason=decision.reason,
+            matched_identifier_values=decision.matched_identifier_values,
+            details=details,
+        )
+    else:
+        store.apply_event_reconciliation(
+            record, outcome=decision.outcome, existing_memory_id=decision.existing_memory_id,
+            details=details, actor_id="system",
+        )
 
 
 def _selected_context_update(record: MemoryRecord, candidates: list[ReconciliationCandidate],

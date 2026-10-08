@@ -35,20 +35,18 @@ class UpdateContextTests(unittest.TestCase):
                                 entities=[entity], claims=[EventClaim(attribute="departure_time", value=departure_time)]),
         )
 
-    def test_resolves_the_real_single_memory_id_from_previous_answer_trace(self) -> None:
+    def test_supplies_the_real_memory_as_a_candidate_from_previous_answer_trace(self) -> None:
         self.store.record_access_event(trace_id="flight-answer", session_id="chat-1", message_id="user-1",
                                        memory_id="flight", event_type="injected", prompt_label="M1")
         result = asyncio.run(resolve_update_context(
             user_content="It has changed.",
             messages=[{"role": "assistant", "content": "Flight at 7 PM [M1]", "trace_id": "flight-answer"}],
             store=self.store, owner_id="default", session_id="chat-1", project_id="schedule-v2",
-            project_scope="schedule-v2", provider=_Provider({"outcome": "update"}),
+            project_scope="schedule-v2",
         ))
-        self.assertIsNotNone(result)
-        self.assertEqual(result.target.memory_id, "flight")
-        self.assertEqual(result.extraction_target.memory_id, "flight")
+        self.assertEqual([record.memory_id for record in result.continuity_candidates], ["flight"])
 
-    def test_refuses_to_choose_when_previous_answer_used_two_events(self) -> None:
+    def test_multiple_previous_events_remain_candidates_for_the_current_turn_planner(self) -> None:
         for memory_id in ("flight", "train"):
             self.store.record_access_event(trace_id="combined-answer", session_id="chat-1", message_id="user-1",
                                            memory_id=memory_id, event_type="injected", prompt_label="M1")
@@ -56,10 +54,12 @@ class UpdateContextTests(unittest.TestCase):
             user_content="It has changed.",
             messages=[{"role": "assistant", "content": "Schedules [M1] [M2]", "trace_id": "combined-answer"}],
             store=self.store, owner_id="default", session_id="chat-1", project_id="schedule-v2",
-            project_scope="schedule-v2", provider=_Provider({"outcome": "update"}),
+            project_scope="schedule-v2",
         ))
-        self.assertIsNone(result.target)
-        self.assertTrue(result.ambiguous)
+        self.assertEqual(
+            [record.memory_id for record in result.continuity_candidates],
+            ["flight", "train"],
+        )
 
     def test_prompt_labels_are_not_used_as_identity(self) -> None:
         self.store.record_access_event(trace_id="train-answer", session_id="chat-1", message_id="user-2",
@@ -68,21 +68,20 @@ class UpdateContextTests(unittest.TestCase):
             user_content="It has changed.",
             messages=[{"role": "assistant", "content": "Train at 10 PM [M1]", "trace_id": "train-answer"}],
             store=self.store, owner_id="default", session_id="chat-1", project_id="schedule-v2",
-            project_scope="schedule-v2", provider=_Provider({"outcome": "update"}),
+            project_scope="schedule-v2",
         ))
-        self.assertEqual(result.target.memory_id, "train")
+        self.assertEqual([record.memory_id for record in result.continuity_candidates], ["train"])
 
-    def test_non_update_reply_decision_still_constrains_memory_extraction(self) -> None:
+    def test_explicit_identifier_does_not_turn_trace_evidence_into_authority(self) -> None:
         self.store.record_access_event(trace_id="flight-answer", session_id="chat-1", message_id="user-1",
                                        memory_id="flight", event_type="injected", prompt_label="M1")
         result = asyncio.run(resolve_update_context(
-            user_content="Tell me more.",
+            user_content="TRAIN-42 has changed.",
             messages=[{"role": "assistant", "content": "Flight at 7 PM [M1]", "trace_id": "flight-answer"}],
             store=self.store, owner_id="default", session_id="chat-1", project_id="schedule-v2",
-            project_scope="schedule-v2", provider=_Provider({"outcome": "not_update"}),
+            project_scope="schedule-v2",
         ))
-        self.assertIsNone(result.target)
-        self.assertEqual(result.extraction_target.memory_id, "flight")
+        self.assertEqual([record.memory_id for record in result.continuity_candidates], ["flight"])
 
     def test_target_constraint_rejects_an_unconnected_event_candidate(self) -> None:
         extractor = MemoryExtractor(_Provider({"candidates": [{

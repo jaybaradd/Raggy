@@ -72,6 +72,10 @@ class MemoryReconciliationTests(unittest.TestCase):
             self.assertEqual(result.outcome, "conflict")
             self.assertEqual(self.store.get(existing.memory_id).status, "active")
             self.assertEqual(self.store.get(incoming.memory_id).status, "candidate")
+            self.assertEqual(
+                self.store.get(existing.memory_id).subject_id,
+                self.store.get(incoming.memory_id).subject_id,
+            )
             conflict = self.store.get_conflict(result.conflict_id or 0, owner_id="owner-a")
             self.assertEqual(conflict["conflict_type"], "claim_mismatch")
             self.assertEqual(conflict["details"]["changed_claims"][new_claim[0]]["incoming"], new_claim[1])

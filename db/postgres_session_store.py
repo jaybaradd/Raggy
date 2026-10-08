@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from core.conversation.titles import DEFAULT_CHAT_TITLE, title_from_first_message
 from db.postgres_migrations import PostgresMigrationRunner, session_migrations
 
 
@@ -42,6 +43,30 @@ class PostgresSessionRepository:
     def _initialise(self) -> None:
         with self._connect() as connection:
             PostgresMigrationRunner("sessions").apply(connection, session_migrations())
+            with connection.cursor() as cursor:
+                self._backfill_default_titles(cursor)
+
+    @staticmethod
+    def _backfill_default_titles(cursor: Any) -> None:
+        """Give legacy default-titled chats the same deterministic title."""
+        cursor.execute(
+            """SELECT sessions.session_id, messages.content
+               FROM sessions
+               JOIN LATERAL (
+                   SELECT content FROM session_messages
+                   WHERE session_messages.session_id = sessions.session_id AND role = 'user'
+                   ORDER BY turn_index LIMIT 1
+               ) messages ON TRUE
+               WHERE sessions.title = %s""",
+            (DEFAULT_CHAT_TITLE,),
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            cursor.execute(
+                """UPDATE sessions SET title=%s
+                   WHERE session_id=%s AND title=%s""",
+                (title_from_first_message(row["content"]), row["session_id"], DEFAULT_CHAT_TITLE),
+            )
 
     @staticmethod
     def _normalise_project_name(name: str) -> str:
@@ -193,8 +218,9 @@ class PostgresSessionRepository:
         message_id, now = uuid.uuid4(), datetime.now(timezone.utc)
         # Locking the session row serializes turn-index allocation per chat.
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM sessions WHERE session_id = %s AND owner_id = %s FOR UPDATE", (session_id, owner_id))
-            if cursor.fetchone() is None:
+            cursor.execute("SELECT title FROM sessions WHERE session_id = %s AND owner_id = %s FOR UPDATE", (session_id, owner_id))
+            session = cursor.fetchone()
+            if session is None:
                 raise KeyError(f"Session '{session_id}' not found")
             cursor.execute("SELECT COALESCE(MAX(turn_index), 0) + 1 AS next_turn FROM session_messages WHERE session_id = %s", (session_id,))
             next_turn = cursor.fetchone()["next_turn"]
@@ -204,8 +230,32 @@ class PostgresSessionRepository:
                 message_id, session_id, next_turn, trace_id, role, content,
                 json.dumps(attachments or [], sort_keys=True), now,
             ))
-            cursor.execute("UPDATE sessions SET updated_at = %s WHERE session_id = %s", (now, session_id))
+            cursor.execute(
+                "UPDATE sessions SET updated_at = %s WHERE session_id = %s", (now, session_id),
+            )
         return str(message_id)
+
+    def update_title_if_default(self, session_id: str, title: str,
+                                owner_id: str = "default") -> dict:
+        """Compare-and-set a generated title without overwriting user-defined titles."""
+        clean_title = " ".join(title.split()).strip()
+        if not clean_title or len(clean_title) > 56:
+            raise ValueError("session title must contain at most 56 characters")
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE sessions SET title=%s, updated_at=%s
+                   WHERE session_id=%s AND owner_id=%s AND title=%s""",
+                (clean_title, now, session_id, owner_id, DEFAULT_CHAT_TITLE),
+            )
+            cursor.execute(
+                "SELECT * FROM sessions WHERE session_id=%s AND owner_id=%s",
+                (session_id, owner_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Session '{session_id}' not found")
+        return self._session_from_row(row)
 
     def get_messages(self, session_id: str, owner_id: str = "default") -> list[dict]:
         with self._connect() as connection, connection.cursor() as cursor:

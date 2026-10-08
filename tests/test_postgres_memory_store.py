@@ -8,6 +8,7 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from core.memory.commands import propose_event_claim_change
 from core.memory.models import EventMemory, IdentifierReference, MemoryRecord, PreferenceMemory
 from core.memory.reconciliation import ReconciliationDecision, reconciliation_details
 
@@ -37,7 +38,8 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         return MemoryRecord(owner_id="owner-a", scope="project", project_scope="imports", kind="event",
                             status="active", user_confirmed=True,
                             payload=EventMemory(event_type="shipment arrival", summary="AC-42 arrives",
-                                                entities=["AC-42"], locations=["Tokyo"], temporal_scope=temporal))
+                                                entities=["AC-42"], locations=["Tokyo"], temporal_scope=temporal,
+                                                identifier_references=[IdentifierReference(value="AC-42")]))
 
     def test_dedupe_conflict_resolution_audit_and_restart(self) -> None:
         existing = self.store.capture_event(self._event(), event_type="created")
@@ -51,6 +53,7 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         self.assertEqual(resolved["status"], "resolved")
         self.assertEqual(self.store.get(existing.record.memory_id).status, "superseded")
         self.assertEqual(self.store.get(conflict.record.memory_id).status, "active")
+        self.assertEqual(existing.record.subject_id, conflict.record.subject_id)
         relationship = self.store.list_relationships(existing.record.memory_id, owner_id="owner-a")[0]
         self.assertEqual(relationship["relationship_type"], "superseded_by")
         self.assertEqual(relationship["conflict_id"], conflict.conflict_id)
@@ -88,6 +91,27 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         self.assertIsNone(self.store.get_owned(record.memory_id, owner_id="owner-b"))
         with self.assertRaises(KeyError):
             self.store.list_audit_events(record.memory_id, owner_id="owner-b")
+
+    def test_edit_atomically_creates_a_replacement_version(self) -> None:
+        original = MemoryRecord(
+            owner_id="owner-a", scope="user", kind="preference", status="active",
+            user_confirmed=True, source_turn_id="turn-original",
+            payload=PreferenceMemory(preferred_behavior="Be concise"),
+        )
+        self.store.upsert(original)
+        replacement = self.store.edit(
+            original.memory_id,
+            {"preferred_behavior": "Be detailed", "applicability_conditions": [],
+             "strength": 0.5, "consent": False},
+            actor_id="owner-a",
+        )
+        persisted_original = self.store.get(original.memory_id)
+        self.assertEqual(persisted_original.status, "superseded")
+        self.assertEqual(persisted_original.superseded_by, replacement.memory_id)
+        self.assertEqual(persisted_original.payload.preferred_behavior, "Be concise")
+        self.assertEqual(replacement.payload.preferred_behavior, "Be detailed")
+        relationship = self.store.list_relationships(original.memory_id, owner_id="owner-a")[0]
+        self.assertEqual(relationship["source"], "manual_edit")
 
     def test_identifier_candidates_are_project_scoped_and_restart_safe(self) -> None:
         record = self._event()
@@ -133,6 +157,30 @@ class PostgresMemoryRepositoryTests(unittest.TestCase):
         self.assertEqual(conflict["conflict_type"], "claim_mismatch")
         self.assertEqual(self.store.get(existing.memory_id).status, "active")
         self.assertEqual(self.store.get(incoming.memory_id).status, "candidate")
+
+    def test_claim_change_command_is_scope_checked_and_retry_safe(self) -> None:
+        existing = self._event("Tuesday")
+        self.store.upsert(existing)
+
+        def propose():
+            incoming = self._event("Thursday")
+            incoming.status, incoming.user_confirmed = "candidate", False
+            incoming.source_turn_id = "assistant-turn-1"
+            return propose_event_claim_change(
+                store=self.store, incoming=incoming, target_memory_id=existing.memory_id,
+                owner_id="owner-a", session_id="other-chat", project_id=None,
+                project_scope="imports", confidence=0.99, reason="Exact identifier match.",
+                matched_identifier_values=["ac42"],
+            )
+
+        first, retried = propose(), propose()
+        self.assertEqual(retried.record.memory_id, first.record.memory_id)
+        self.assertEqual(retried.conflict_id, first.conflict_id)
+        self.assertEqual(len(self.store.list_conflicts(owner_id="owner-a", status=None)), 1)
+        self.assertEqual(
+            self.store.get_conflict(first.conflict_id, owner_id="owner-a")["details"]["command"],
+            "propose_event_claim_change",
+        )
 
     def test_related_link_is_idempotent(self) -> None:
         existing = self._event("Tuesday")

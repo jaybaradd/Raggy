@@ -71,8 +71,8 @@ class MemoryReconciler:
             for candidate in candidates
         )
         return f"""Classify one incoming operational event against exact identifier candidates.
-Event labels are descriptive only: do not require matching labels such as arrival,
-delay, reschedule, incident, or meeting. Select an existing ID only from the list.
+Event labels are descriptive only and must not be treated as a closed taxonomy or
+identity rule. Select an existing ID only from the list.
 An `injected_context` candidate is an implicit reference and requires at least
 0.90 confidence before selecting it for duplicate, update, or related.
 

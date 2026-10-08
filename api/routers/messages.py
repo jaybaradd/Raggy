@@ -29,11 +29,10 @@ from fastapi.responses import StreamingResponse
 
 from api.schemas import MemoryExtractionStatusResponse, SendMessageRequest
 from core.llm.client import llm_client
+from core.conversation.titles import DEFAULT_CHAT_TITLE, generate_chat_title
 from core.memory.extractor import MemoryExtractor
 from core.memory.jobs import extract_turn_memories
 from core.memory.update_context import resolve_update_context
-from core.memory.planner import MemoryContextResult
-from core.memory.projection import memory_text
 from core.latency import elapsed_ms, log_latency, now_ns
 from db.repository_factory import repositories
 from core.retrieval.engine import (
@@ -105,6 +104,11 @@ async def send_message(
     session = session_store.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    title_started = now_ns()
+    title_task = (
+        asyncio.create_task(generate_chat_title(llm_client, body.content))
+        if session["title"] == DEFAULT_CHAT_TITLE else None
+    )
 
     # 1. Persist the user message
     trace_id = str(uuid4())
@@ -121,7 +125,7 @@ async def send_message(
     started = now_ns()
     update_context = await resolve_update_context(
         user_content=body.content, messages=history[:-1], store=memory_store,
-        provider=llm_client, owner_id="default", session_id=session_id,
+        owner_id="default", session_id=session_id,
         project_id=session.get("project_id"), project_scope=session.get("project_scope"),
     )
     log_latency("generation", "update_context", elapsed_ms(started), trace_id=trace_id,
@@ -149,47 +153,41 @@ async def send_message(
     else:
         combined_context = retrieval_result.context
 
-    # A unique event from the immediately preceding response is the only safe
-    # continuity context for the next turn.  Do not fall back to project-wide
-    # semantic retrieval and let a different event replace that referent.
-    # The update classifier controls response wording, not target identity.
+    # Resolve every turn against the complete scoped candidate pipeline. A
+    # previous response contributes candidates, but never bypasses identifier,
+    # semantic, graph, planner, or Postgres eligibility checks.
     started = now_ns()
-    if update_context.extraction_target is not None:
-        target = update_context.extraction_target
-        memory = {
-            "memory_id": target.memory_id,
-            "memory_text": memory_text(target),
-            "kind": target.kind,
-            "scope": target.scope,
-            "confidence": target.confidence,
-            "prompt_label": "M1",
-            "candidate_source": "previous_response",
-            "selection_source": "previous_response",
-            "selection_relation": "continuity",
-            "selection_confidence": 1.0,
-        }
-        memory_result = MemoryContextResult(
-            context=f"[M1 | {target.kind} | {target.scope}]\n{memory['memory_text']}",
-            memories=[memory], planner_status="selected",
-            rationale="Bounded to the single event used in the preceding assistant response.",
-            reconciliation_hints=[memory], candidate_counts={"previous_response": 1},
-        )
-    elif update_context.ambiguous:
-        memory_result = MemoryContextResult(
-            context="", memories=[], planner_status="no_selection",
-            rationale="Potential update target is ambiguous or unavailable.",
-            reconciliation_hints=[], candidate_counts={},
-        )
-    else:
-        memory_result = await build_memory_context(
-            query=body.content,
-            owner_id="default",
-            session_id=session_id,
-            project_id=session.get("project_id"),
-            project_scope=session.get("project_scope"),
-            store=memory_store,
-            graph=graph_store,
-            planner_provider=llm_client,
+    memory_result = await build_memory_context(
+        query=body.content,
+        owner_id="default",
+        session_id=session_id,
+        project_id=session.get("project_id"),
+        project_scope=session.get("project_scope"),
+        store=memory_store,
+        graph=graph_store,
+        planner_provider=llm_client,
+        continuity_candidates=update_context.continuity_candidates,
+    )
+    selected_updates = [
+        memory for memory in memory_result.memories
+        if memory.get("selection_relation") == "updates"
+    ]
+    update_hints = [
+        memory for memory in memory_result.memories
+        if memory.get("selection_relation") == "updates"
+        and float(memory.get("selection_confidence") or 0.0) >= 0.90
+    ]
+    uncertain_update = len(update_hints) != len(selected_updates) or any(
+        memory.get("selection_relation") == "uncertain"
+        for memory in memory_result.memories
+    )
+    # A unique target selected from the full current-turn candidate set may
+    # constrain pronoun resolution during extraction. Multiple updates remain
+    # unconstrained here and are associated independently after extraction.
+    extraction_target = None
+    if len(update_hints) == 1:
+        extraction_target = memory_store.get_owned(
+            update_hints[0]["memory_id"], owner_id="default",
         )
     log_latency("generation", "memory_context", elapsed_ms(started), trace_id=trace_id,
                 memory_count=len(memory_result.memories))
@@ -262,13 +260,13 @@ async def send_message(
 
     # 3. Build the augmented prompt for this turn
     augmented_query = build_rag_prompt(body.content, combined_context)
-    if update_context.target is not None:
+    if update_hints and not uncertain_update:
         augmented_query += (
             "\n\nThe user has proposed a change to one remembered event. It is pending "
             "review in the UI. Do not ask for conversational confirmation or claim that the "
             "memory was updated, replaced, or confirmed."
         )
-    elif update_context.ambiguous:
+    elif uncertain_update:
         augmented_query += (
             "\n\nThe user appears to be changing a remembered event, but no single target "
             "was resolved. Ask one concise clarification question; do not guess or claim an update."
@@ -309,9 +307,18 @@ async def send_message(
         inline_chars=len(inline),
     )
 
+    if title_task is not None:
+        generated_title = await title_task
+        session = session_store.update_title_if_default(session_id, generated_title)
+        log_latency(
+            "generation", "chat_title", elapsed_ms(title_started), trace_id=trace_id,
+            session_id=session_id, title_chars=len(session["title"]),
+        )
+
     return StreamingResponse(
         _stream_response(
             session_id=session_id,
+            session_title=session["title"],
             project_id=session.get("project_id"),
             project_scope=session.get("project_scope"),
             messages=messages,
@@ -326,7 +333,7 @@ async def send_message(
             reconciliation_hints=memory_result.reconciliation_hints or [],
             user_content=body.content,
             trace_id=trace_id,
-            extraction_target=update_context.extraction_target,
+            extraction_target=extraction_target,
             recent_messages=update_context.recent_messages,
             request_started_ns=request_started,
         ),
@@ -340,6 +347,7 @@ async def send_message(
 
 async def _stream_response(
     session_id: str,
+    session_title: str,
     project_id: str | None,
     project_scope: str | None,
     messages: list[dict],
@@ -361,6 +369,7 @@ async def _stream_response(
     first_token_seen = False
 
     try:
+        yield f"event: session\ndata: {json.dumps({'type': 'session', 'title': session_title})}\n\n"
         # Send structured provenance before token generation. Existing clients
         # can ignore this event and continue consuming token data events.
         yield f"event: sources\ndata: {json.dumps({'type': 'sources', 'trace_id': trace_id, 'sources': sources})}\n\n"

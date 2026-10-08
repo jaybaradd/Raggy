@@ -48,6 +48,28 @@ class SessionProjectTests(unittest.TestCase):
         self.assertEqual(messages[0]["trace_id"], "trace-1")
         self.assertEqual(messages[2]["attachments"][0]["filename"], "invoice.pdf")
 
+    def test_generated_title_is_compare_and_set(self) -> None:
+        session = self.store.create_session()
+        self.store.append_message(session["session_id"], "user", "First message")
+
+        titled = self.store.update_title_if_default(session["session_id"], "Generated title")
+        unchanged = self.store.update_title_if_default(session["session_id"], "Replacement title")
+
+        self.assertEqual(titled["title"], "Generated title")
+        self.assertEqual(unchanged["title"], "Generated title")
+
+    def test_legacy_default_title_is_backfilled_from_first_user_message(self) -> None:
+        session = self.store.create_session()
+        self.store.append_message(
+            session["session_id"], "user",
+            "A sufficiently descriptive first message for a legacy conversation title",
+        )
+        self.assertEqual(self.store.get_session(session["session_id"])["title"], "New chat")
+
+        restarted = SessionStore(self.db_path)
+
+        self.assertNotEqual(restarted.get_session(session["session_id"])["title"], "New chat")
+
     def test_owner_cannot_read_another_owners_session(self) -> None:
         session = self.store.create_session(owner_id="owner-a")
         self.store.append_message(session["session_id"], "user", "Private", owner_id="owner-a")

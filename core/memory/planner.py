@@ -61,7 +61,7 @@ class MemoryContextResult:
 @dataclass(frozen=True)
 class _Candidate:
     record: MemoryRecord
-    source: Literal["exact_identifier", "semantic", "graph_related"]
+    source: Literal["exact_identifier", "semantic", "graph_related", "previous_response"]
     score: float | None = None
     graph_seed_memory_id: str | None = None
     graph_relationship_id: str | None = None
@@ -177,7 +177,10 @@ def _planning_prompt(query: str, candidates: list[_Candidate]) -> str:
 Select only candidates that directly help answer the current turn. Do not treat a
 candidate as ground truth when the user is correcting it; label that as `updates`.
 Semantic candidates are suggestions, not facts. Return no selection when none is
-relevant. You may select only the supplied IDs.
+relevant. A `previous_response` candidate is conversational continuity evidence,
+not authoritative identity. Select it only when the current wording genuinely
+refers to it. Use `uncertain` when more than one candidate could be the referent.
+You may select only the supplied IDs.
 
 Current user turn:
 {query}
@@ -203,6 +206,7 @@ async def build_memory_context(
     graph: Any | None = None,
     graph_expansion_enabled: bool | None = None,
     graph_expansion_limit: int | None = None,
+    continuity_candidates: list[MemoryRecord] | None = None,
 ) -> MemoryContextResult:
     """Build bounded, provenance-rich memory context before answering a turn."""
     if store is None:
@@ -226,6 +230,21 @@ async def build_memory_context(
     ) if references else []
     candidates = [_Candidate(record, "exact_identifier") for record in exact_records]
     candidate_ids = {candidate.record.memory_id for candidate in candidates}
+    continuity_ids = {record.memory_id for record in continuity_candidates or []}
+
+    # A response trace is conversational evidence, never identity authority.
+    # Explicit identifiers above deliberately suppress these candidates.
+    if not references:
+        for record in continuity_candidates or []:
+            if record.memory_id in candidate_ids or record.kind != "event":
+                continue
+            if not is_memory_record_eligible(
+                record, owner_id=owner_id, session_id=session_id,
+                project_id=project_id, project_scope=project_scope,
+            ):
+                continue
+            candidates.append(_Candidate(record, "previous_response"))
+            candidate_ids.add(record.memory_id)
 
     try:
         semantic_result = semantic_retriever(
@@ -235,6 +254,10 @@ async def build_memory_context(
         for hit in semantic_result.memories:
             memory_id = str(hit.get("memory_id", ""))
             if not memory_id or memory_id in candidate_ids:
+                continue
+            # Do not let a prior-response event re-enter through vector search
+            # when the current turn supplies a different explicit identifier.
+            if references and memory_id in continuity_ids:
                 continue
             record = store.get_owned(memory_id, owner_id=owner_id)
             if record is None or not is_memory_record_eligible(
@@ -284,11 +307,12 @@ async def build_memory_context(
 
     if not candidates:
         return MemoryContextResult("", [], "no_selection", graph_status=graph_status,
-                                   candidate_counts={"exact_identifier": 0, "semantic": 0, "graph_related": 0})
+                                   candidate_counts={"exact_identifier": 0, "semantic": 0,
+                                                     "graph_related": 0, "previous_response": 0})
 
     candidate_counts = {
         source: sum(candidate.source == source for candidate in candidates)
-        for source in ("exact_identifier", "semantic", "graph_related")
+        for source in ("exact_identifier", "semantic", "graph_related", "previous_response")
     }
 
     try:

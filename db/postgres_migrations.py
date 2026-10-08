@@ -147,10 +147,27 @@ def memory_migrations() -> list[PostgresMigration]:
         cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS conflict_id BIGINT")
         cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS created_by TEXT")
         cursor.execute("ALTER TABLE memory_relationships ADD COLUMN IF NOT EXISTS details_json JSONB NOT NULL DEFAULT '{}'::jsonb")
+    def stable_subjects(cursor: Any) -> None:
+        cursor.execute("""CREATE TABLE IF NOT EXISTS memory_subjects (
+            subject_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, scope TEXT NOT NULL,
+            scope_key TEXT NOT NULL, subject_kind TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""")
+        cursor.execute("""CREATE TABLE IF NOT EXISTS memory_subject_identifiers (
+            subject_identifier_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            subject_id TEXT NOT NULL REFERENCES memory_subjects(subject_id) ON DELETE CASCADE,
+            owner_id TEXT NOT NULL, scope TEXT NOT NULL, scope_key TEXT NOT NULL,
+            scheme TEXT NOT NULL, normalized_value TEXT NOT NULL, raw_value TEXT NOT NULL,
+            confidence DOUBLE PRECISION NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(owner_id, scope, scope_key, scheme, normalized_value))""")
+        cursor.execute("""CREATE INDEX IF NOT EXISTS idx_memory_subject_identifier_lookup
+            ON memory_subject_identifiers(owner_id, scope, scope_key, scheme, normalized_value)""")
+        cursor.execute("ALTER TABLE memory_records ADD COLUMN IF NOT EXISTS subject_id TEXT REFERENCES memory_subjects(subject_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_records_subject ON memory_records(subject_id, status)")
     return [PostgresMigration(1, "memory_records_lifecycle_and_outbox", initial),
             PostgresMigration(2, "memory_identifier_references", identifier_references),
             PostgresMigration(3, "memory_relationship_uniqueness", relationship_uniqueness),
-            PostgresMigration(4, "relationship_provenance", relationship_provenance)]
+            PostgresMigration(4, "relationship_provenance", relationship_provenance),
+            PostgresMigration(5, "stable_memory_subjects", stable_subjects)]
 
 
 def evidence_migrations() -> list[PostgresMigration]:

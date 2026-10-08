@@ -58,7 +58,7 @@ class MemoryIdentifierCandidateTests(unittest.TestCase):
 
         self.assertEqual([record.memory_id for record in candidates], ["explicit", "legacy"])
 
-    def test_identifier_index_is_replaced_atomically_on_upsert(self) -> None:
+    def test_identifier_change_preserves_the_old_subject_alias(self) -> None:
         record = self._event(memory_id="mutable", project_id="imports-id", references=[{"value": "EK420"}])
         self.store.upsert(record)
         record.payload.identifier_references = [IdentifierReference(value="PO-99")]
@@ -72,7 +72,7 @@ class MemoryIdentifierCandidateTests(unittest.TestCase):
             owner_id="owner-a", session_id="chat", project_id="imports-id", project_scope="imports",
             identifier_references=[IdentifierReference(value="PO99")],
         )
-        self.assertEqual(old, [])
+        self.assertEqual([item.memory_id for item in old], ["mutable"])
         self.assertEqual([item.memory_id for item in new], ["mutable"])
 
     def test_identifier_scheme_is_part_of_an_exact_match(self) -> None:

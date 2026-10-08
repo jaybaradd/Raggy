@@ -53,7 +53,23 @@ class PostgresMemoryRepository:
 
     def _initialise(self) -> None:
         with self._connect() as connection:
-            PostgresMigrationRunner("memories").apply(connection, memory_migrations())
+            completed = PostgresMigrationRunner("memories").apply(connection, memory_migrations())
+            if 5 not in completed:
+                return
+            now = self._now()
+            with connection.cursor() as cursor:
+                cursor.execute("""SELECT * FROM memory_records
+                    WHERE kind='event' AND subject_id IS NULL
+                    AND status IN ('candidate','active') ORDER BY created_at, memory_id""")
+                records = [self._record_from_row(row) for row in cursor.fetchall()]
+                for record in records:
+                    self._bind_subject(cursor, record, now)
+                    if record.subject_id is not None:
+                        cursor.execute(
+                            "UPDATE memory_records SET subject_id=%s WHERE memory_id=%s",
+                            (record.subject_id, record.memory_id),
+                        )
+                        self._enqueue(cursor, record.memory_id, "qdrant", now)
 
     @staticmethod
     def _now() -> datetime:
@@ -68,7 +84,7 @@ class PostgresMemoryRepository:
     @staticmethod
     def _record_from_row(row: dict[str, Any]) -> MemoryRecord:
         return MemoryRecord(
-            memory_id=row["memory_id"], owner_id=row["owner_id"], scope=row["scope"], session_id=row["session_id"],
+            memory_id=row["memory_id"], subject_id=row["subject_id"], owner_id=row["owner_id"], scope=row["scope"], session_id=row["session_id"],
             project_id=row["project_id"], project_scope=row["project_scope"], kind=row["kind"], status=row["status"],
             confidence=row["confidence"], user_confirmed=row["user_confirmed"], evidence_refs=row["evidence_refs_json"] or [],
             source_turn_id=row["source_turn_id"], extraction_model=row["extraction_model"], extraction_version=row["extraction_version"],
@@ -78,7 +94,7 @@ class PostgresMemoryRepository:
 
     @staticmethod
     def _params(record: MemoryRecord) -> tuple[Any, ...]:
-        return (record.memory_id, record.owner_id, record.scope, record.session_id, record.project_id, record.project_scope,
+        return (record.memory_id, record.subject_id, record.owner_id, record.scope, record.session_id, record.project_id, record.project_scope,
                 record.kind, record.status, record.confidence, record.user_confirmed, json.dumps(record.evidence_refs),
                 record.source_turn_id, record.extraction_model, record.extraction_version, record.identity_key,
                 record.valid_from, record.valid_to, record.superseded_by,
@@ -115,13 +131,14 @@ class PostgresMemoryRepository:
 
     def _upsert(self, cursor: Any, record: MemoryRecord, *, event_type: str, actor_id: str | None,
                 details: dict | None, now: datetime) -> None:
+        self._bind_subject(cursor, record, now)
         record.updated_at = now
         cursor.execute("""INSERT INTO memory_records(
-            memory_id, owner_id, scope, session_id, project_id, project_scope, kind, status, confidence,
+            memory_id, subject_id, owner_id, scope, session_id, project_id, project_scope, kind, status, confidence,
             user_confirmed, evidence_refs_json, source_turn_id, extraction_model, extraction_version, identity_key,
             valid_from, valid_to, superseded_by, payload_json, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
-            ON CONFLICT(memory_id) DO UPDATE SET owner_id=EXCLUDED.owner_id, scope=EXCLUDED.scope,
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+            ON CONFLICT(memory_id) DO UPDATE SET subject_id=EXCLUDED.subject_id, owner_id=EXCLUDED.owner_id, scope=EXCLUDED.scope,
             session_id=EXCLUDED.session_id, project_id=EXCLUDED.project_id, project_scope=EXCLUDED.project_scope,
             status=EXCLUDED.status, confidence=EXCLUDED.confidence, user_confirmed=EXCLUDED.user_confirmed,
             evidence_refs_json=EXCLUDED.evidence_refs_json, identity_key=EXCLUDED.identity_key, valid_to=EXCLUDED.valid_to,
@@ -131,6 +148,84 @@ class PostgresMemoryRepository:
         self._audit(cursor, record.memory_id, event_type, actor_id, details, now)
         self._enqueue(cursor, record.memory_id, "qdrant", now)
         self._enqueue(cursor, record.memory_id, "graph", now)
+
+    @staticmethod
+    def _subject_scope_key(record: MemoryRecord) -> str:
+        if record.scope == "session":
+            return f"session:{record.session_id or ''}"
+        if record.scope == "project":
+            if record.project_id:
+                return f"project:{record.project_id}"
+            return f"project-name:{' '.join((record.project_scope or '').split()).casefold()}"
+        return record.scope
+
+    def _bind_subject(self, cursor: Any, record: MemoryRecord, now: datetime) -> None:
+        """Bind an identified event to one stable, scope-local subject."""
+        if record.kind != "event" or not record.payload.identifier_references:
+            return
+        scope_key = self._subject_scope_key(record)
+        references = {
+            (reference.scheme, reference.normalized_value): reference
+            for reference in record.payload.identifier_references
+        }
+        lock_key = "\x1f".join((record.owner_id, record.scope, scope_key, *sorted(
+            f"{scheme}:{value}" for scheme, value in references
+        )))
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
+        if record.subject_id is not None:
+            cursor.execute(
+                "SELECT owner_id, scope, scope_key FROM memory_subjects WHERE subject_id=%s",
+                (record.subject_id,),
+            )
+            subject_row = cursor.fetchone()
+            if subject_row is not None:
+                same_owner_scope = (
+                    subject_row["owner_id"], subject_row["scope"]
+                ) == (record.owner_id, record.scope)
+                if same_owner_scope and record.scope == "project" and subject_row["scope_key"] != scope_key:
+                    cursor.execute(
+                        "UPDATE memory_subjects SET scope_key=%s, updated_at=%s WHERE subject_id=%s",
+                        (scope_key, now, record.subject_id),
+                    )
+                    cursor.execute(
+                        "UPDATE memory_subject_identifiers SET scope_key=%s WHERE subject_id=%s",
+                        (scope_key, record.subject_id),
+                    )
+                elif not same_owner_scope or subject_row["scope_key"] != scope_key:
+                    raise ValueError("memory subject belongs to another visibility scope")
+        conditions = " OR ".join("(scheme=%s AND normalized_value=%s)" for _ in references)
+        params = [value for key in references for value in key]
+        cursor.execute(
+            f"""SELECT DISTINCT subject_id FROM memory_subject_identifiers
+                WHERE owner_id=%s AND scope=%s AND scope_key=%s AND ({conditions})""",
+            (record.owner_id, record.scope, scope_key, *params),
+        )
+        subject_ids = {str(row["subject_id"]) for row in cursor.fetchall()}
+        if record.subject_id is not None:
+            if subject_ids - {record.subject_id}:
+                raise ValueError("event identifier already belongs to another subject")
+        else:
+            if len(subject_ids) > 1:
+                return
+            record.subject_id = next(iter(subject_ids), str(uuid.uuid4()))
+
+        cursor.execute(
+            """INSERT INTO memory_subjects(
+                subject_id, owner_id, scope, scope_key, subject_kind, created_at, updated_at
+            ) VALUES (%s,%s,%s,%s,'event',%s,%s)
+            ON CONFLICT(subject_id) DO UPDATE SET updated_at=EXCLUDED.updated_at""",
+            (record.subject_id, record.owner_id, record.scope, scope_key, now, now),
+        )
+        for reference in references.values():
+            cursor.execute(
+                """INSERT INTO memory_subject_identifiers(
+                    subject_id, owner_id, scope, scope_key, scheme, normalized_value,
+                    raw_value, confidence, created_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(owner_id, scope, scope_key, scheme, normalized_value) DO NOTHING""",
+                (record.subject_id, record.owner_id, record.scope, scope_key, reference.scheme,
+                 reference.normalized_value, reference.value, reference.confidence, now),
+            )
 
     def upsert(self, record: MemoryRecord, *, event_type: str = "created", actor_id: str | None = None,
                details: dict | None = None) -> None:
@@ -236,8 +331,28 @@ class PostgresMemoryRepository:
                 assert existing is not None
                 self._audit(cursor, existing.memory_id, "duplicate_detected", actor_id, details, now)
                 return EventCaptureResult("duplicate", existing)
+            if existing is not None and existing.subject_id is not None and outcome in {"update", "related"}:
+                record.subject_id = existing.subject_id
             if outcome == "update":
                 assert existing is not None
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"event-claim-change:{record.memory_id}:{existing.memory_id}",),
+                )
+                cursor.execute(
+                    """SELECT conflict_id FROM memory_conflicts
+                       WHERE incoming_memory_id=%s AND existing_memory_id=%s
+                       ORDER BY conflict_id DESC LIMIT 1""",
+                    (record.memory_id, existing.memory_id),
+                )
+                prior = cursor.fetchone()
+                if prior is not None:
+                    cursor.execute("SELECT * FROM memory_records WHERE memory_id=%s", (record.memory_id,))
+                    persisted = cursor.fetchone()
+                    return EventCaptureResult(
+                        "conflict", self._record_from_row(persisted) if persisted else record,
+                        int(prior["conflict_id"]),
+                    )
                 record.status, record.user_confirmed = "candidate", False
                 self._upsert(cursor, record, event_type="conflict_candidate_created", actor_id=actor_id,
                              details=details, now=now)
@@ -331,6 +446,16 @@ class PostgresMemoryRepository:
             cursor.execute("SELECT * FROM memory_records WHERE memory_id=%s AND owner_id=%s", (memory_id, owner_id)); row = cursor.fetchone()
         return self._record_from_row(row) if row else None
 
+    def list_subject_records(self, subject_id: str, *, owner_id: str) -> list[MemoryRecord]:
+        """Return every retained version for one owned subject."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT * FROM memory_records WHERE subject_id=%s AND owner_id=%s
+                   ORDER BY created_at, memory_id""",
+                (subject_id, owner_id),
+            )
+            return [self._record_from_row(row) for row in cursor.fetchall()]
+
     @staticmethod
     def _candidate_scope_clause(*, session_id: str, project_id: str | None,
                                 project_scope: str | None) -> tuple[str, list[Any]]:
@@ -384,6 +509,21 @@ class PostgresMemoryRepository:
             candidates = [self._record_from_row(row) for row in cursor.fetchall()]
             if len(candidates) >= limit:
                 return candidates
+            cursor.execute(
+                f"""SELECT DISTINCT records.*
+                    FROM memory_subject_identifiers refs
+                    JOIN memory_records records ON records.subject_id=refs.subject_id
+                    WHERE {base_where} AND ({reference_match_clause})
+                    ORDER BY records.updated_at DESC LIMIT %s""",
+                (owner_id, now, now, *scope_params, *reference_match_params, limit),
+            )
+            known_ids = {record.memory_id for record in candidates}
+            for row in cursor.fetchall():
+                if row["memory_id"] not in known_ids:
+                    candidates.append(self._record_from_row(row))
+                    known_ids.add(row["memory_id"])
+                    if len(candidates) >= limit:
+                        return candidates
             cursor.execute(
                 f"""SELECT records.* FROM memory_records records
                     WHERE {base_where} AND records.kind='event' AND NOT EXISTS (
@@ -589,14 +729,45 @@ class PostgresMemoryRepository:
         def mutate(record: MemoryRecord) -> None:
             if record.status not in {"candidate", "active"}: raise ValueError(f"Cannot promote a {record.status} memory")
             record.scope, record.project_scope, record.user_confirmed, record.status = scope, project_scope, True, "active"
+            if record.kind == "event": record.subject_id = None
         return self._mutate(memory_id, actor_id, mutate, "promoted", {"from_scope": previous.scope, "to_scope": scope, "project_scope": project_scope})
 
     def edit(self, memory_id: str, payload: dict, *, actor_id: str = "default") -> MemoryRecord:
         kinds = {"knowledge": KnowledgeAtom, "preference": PreferenceMemory, "solution": SolutionMemory, "entity": EntityMemory, "event": EventMemory}
-        def mutate(record: MemoryRecord) -> None:
-            record.payload = kinds[record.kind].model_validate(payload)
-            if record.kind == "event": record.identity_key = event_identity_key(record)
-        return self._mutate(memory_id, actor_id, mutate, "edited")
+        now = self._now()
+        with self._connect() as connection, connection.cursor() as cursor:
+            record = self._owned_locked(cursor, memory_id, actor_id)
+            if record.status not in {"candidate", "active"}:
+                raise ValueError(f"Cannot edit a {record.status} memory")
+
+            replacement = record.model_copy(deep=True)
+            replacement.memory_id = str(uuid.uuid4())
+            replacement.payload = kinds[record.kind].model_validate(payload)
+            replacement.superseded_by = None
+            replacement.created_at = now
+            replacement.updated_at = now
+            if replacement.kind == "event":
+                replacement.identity_key = event_identity_key(replacement)
+
+            record.status, record.superseded_by = "superseded", replacement.memory_id
+            details = {"replacement_memory_id": replacement.memory_id, "relationship": "superseded_by"}
+            self._upsert(
+                cursor, replacement, event_type="edited_replacement_created",
+                actor_id=actor_id, details={"replaces_memory_id": record.memory_id}, now=now,
+            )
+            self._upsert(
+                cursor, record, event_type="superseded_by_edit",
+                actor_id=actor_id, details=details, now=now,
+            )
+            self._link(
+                cursor, record.memory_id, replacement.memory_id, "superseded_by", now,
+                source="manual_edit", created_by=actor_id, details=details,
+            )
+            self._audit(
+                cursor, replacement.memory_id, "replacement_linked", actor_id,
+                {"replaces_memory_id": record.memory_id}, now,
+            )
+            return replacement
 
     def supersede(self, memory_id: str, replacement_id: str, *, actor_id: str = "default") -> MemoryRecord:
         if memory_id == replacement_id: raise ValueError("A memory cannot supersede itself")

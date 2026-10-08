@@ -314,7 +314,8 @@ class QdrantStore:
             id=_chunk_id_to_int(record.memory_id),
             vector={"dense": vector, _SPARSE_VECTOR_NAME: sparse},
             payload={
-                "memory_id": record.memory_id, "memory_text": text, "kind": record.kind,
+                "memory_id": record.memory_id, "subject_id": record.subject_id,
+                "memory_text": text, "kind": record.kind,
                 "owner_id": record.owner_id, "scope": record.scope,
                 "session_id": record.session_id, "project_id": record.project_id, "project_scope": record.project_scope,
                 "status": record.status, "confidence": record.confidence,

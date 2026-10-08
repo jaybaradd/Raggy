@@ -16,6 +16,7 @@ from threading import Lock
 from typing import TypedDict
 
 from config import settings
+from core.conversation.titles import DEFAULT_CHAT_TITLE, title_from_first_message
 from db.migrations import Migration, MigrationRunner
 
 
@@ -105,6 +106,7 @@ class SessionStore:
                 connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_project_id ON sessions(owner_id, project_id, updated_at DESC)")
             self._backfill_projects(connection)
+            self._backfill_default_titles(connection)
             MigrationRunner("sessions").apply(connection, [
                 Migration(1, "legacy_session_schema_baseline", lambda _: None),
                 Migration(2, "projects_and_project_memberships", lambda _: None),
@@ -124,6 +126,26 @@ class SessionStore:
                                 WHERE owner_id = ? AND project_id IS NULL
                                   AND project_scope IS NOT NULL AND lower(trim(project_scope)) = ?""",
                                (project["project_id"], row["owner_id"], self._normalise_project_name(row["project_scope"])))
+
+    @staticmethod
+    def _backfill_default_titles(connection: sqlite3.Connection) -> None:
+        """Give legacy default-titled chats the same deterministic title."""
+        rows = connection.execute(
+            """SELECT sessions.session_id, messages.content
+               FROM sessions
+               JOIN session_messages messages ON messages.message_id = (
+                   SELECT first.message_id FROM session_messages first
+                   WHERE first.session_id = sessions.session_id AND first.role = 'user'
+                   ORDER BY first.turn_index LIMIT 1
+               )
+               WHERE sessions.title = ?""",
+            (DEFAULT_CHAT_TITLE,),
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                "UPDATE sessions SET title = ? WHERE session_id = ? AND title = ?",
+                (title_from_first_message(row["content"]), row["session_id"], DEFAULT_CHAT_TITLE),
+            )
 
     def _resolve_or_create_project(self, connection: sqlite3.Connection, owner_id: str, name: str) -> dict:
         clean_name = " ".join(name.split())
@@ -238,7 +260,7 @@ class SessionStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
-                "SELECT 1 FROM sessions WHERE session_id = ? AND owner_id = ?", (session_id, owner_id)
+                "SELECT title FROM sessions WHERE session_id = ? AND owner_id = ?", (session_id, owner_id)
             ).fetchone()
             if session is None:
                 raise KeyError(f"Session '{session_id}' not found")
@@ -254,9 +276,30 @@ class SessionStore:
                  json.dumps(attachments or [], sort_keys=True), now),
             )
             connection.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?", (now, session_id)
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?", (now, session_id),
             )
         return message_id
+
+    def update_title_if_default(self, session_id: str, title: str,
+                                owner_id: str = "default") -> Session:
+        """Compare-and-set a generated title without overwriting user-defined titles."""
+        clean_title = " ".join(title.split()).strip()
+        if not clean_title or len(clean_title) > 56:
+            raise ValueError("session title must contain at most 56 characters")
+        now = _now_iso()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE sessions SET title = ?, updated_at = ?
+                   WHERE session_id = ? AND owner_id = ? AND title = ?""",
+                (clean_title, now, session_id, owner_id, DEFAULT_CHAT_TITLE),
+            )
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND owner_id = ?",
+                (session_id, owner_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Session '{session_id}' not found")
+        return self._session_from_row(row)
 
     def get_messages(self, session_id: str, owner_id: str = "default") -> list[Message]:
         with self._connect() as connection:

@@ -11,7 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.memory.models import KnowledgeAtom, MemoryRecord, PreferenceMemory, SolutionMemory
+from core.memory.models import (EventMemory, IdentifierReference, KnowledgeAtom, MemoryRecord,
+                                PreferenceMemory, SolutionMemory)
 from core.memory.extractor import MemoryExtractor
 from core.storage.memory_store import MemoryStore
 
@@ -84,6 +85,122 @@ class Phase2EMemoryTests(unittest.TestCase):
         self.assertEqual(superseded.superseded_by, new.memory_id)
         self.assertEqual(self.store.get(old.memory_id).source_turn_id, "turn-old")
         self.assertEqual(self.store.get(new.memory_id).status, "active")
+
+    def test_edit_creates_a_replacement_without_mutating_history(self) -> None:
+        original = MemoryRecord(
+            owner_id="user-1", scope="user", kind="preference", status="active",
+            user_confirmed=True, source_turn_id="turn-original", evidence_refs=["turn-original"],
+            payload=PreferenceMemory(preferred_behavior="Use short answers"),
+        )
+        self.store.upsert(original)
+
+        replacement = self.store.edit(
+            original.memory_id,
+            {"preferred_behavior": "Use detailed answers", "applicability_conditions": [],
+             "strength": 0.5, "consent": False},
+            actor_id="user-1",
+        )
+
+        persisted_original = self.store.get(original.memory_id)
+        self.assertNotEqual(replacement.memory_id, original.memory_id)
+        self.assertEqual(persisted_original.status, "superseded")
+        self.assertEqual(persisted_original.superseded_by, replacement.memory_id)
+        self.assertEqual(persisted_original.payload.preferred_behavior, "Use short answers")
+        self.assertEqual(replacement.status, "active")
+        self.assertEqual(replacement.payload.preferred_behavior, "Use detailed answers")
+        self.assertEqual(replacement.source_turn_id, "turn-original")
+        relationship = self.store.list_relationships(original.memory_id, owner_id="user-1")[0]
+        self.assertEqual(relationship["relationship_type"], "superseded_by")
+        self.assertEqual(relationship["source"], "manual_edit")
+
+    def test_superseded_memory_cannot_be_edited_again(self) -> None:
+        original = MemoryRecord(
+            owner_id="user-1", scope="user", kind="preference", status="active",
+            user_confirmed=True,
+            payload=PreferenceMemory(preferred_behavior="Use short answers"),
+        )
+        self.store.upsert(original)
+        self.store.edit(
+            original.memory_id,
+            {"preferred_behavior": "Use detailed answers", "applicability_conditions": [],
+             "strength": 0.5, "consent": False},
+            actor_id="user-1",
+        )
+        with self.assertRaisesRegex(ValueError, "Cannot edit a superseded memory"):
+            self.store.edit(
+                original.memory_id,
+                {"preferred_behavior": "Use examples", "applicability_conditions": [],
+                 "strength": 0.5, "consent": False},
+                actor_id="user-1",
+            )
+
+    def test_event_edit_preserves_old_identifier_as_a_subject_alias(self) -> None:
+        original = MemoryRecord(
+            owner_id="user-1", scope="project", project_scope="imports", kind="event",
+            status="active", user_confirmed=True,
+            payload=EventMemory(
+                event_type="shipment", summary="AC-42 arrives Tuesday", entities=["AC-42"],
+                identifier_references=[IdentifierReference(value="AC-42")],
+            ),
+        )
+        self.store.upsert(original)
+        replacement = self.store.edit(
+            original.memory_id,
+            {"event_type": "shipment", "summary": "Bill BL-900 arrives Thursday",
+             "entities": ["BL-900"], "locations": [], "temporal_scope": "Thursday",
+             "identifier_references": [{"value": "BL-900"}], "claims": []},
+            actor_id="user-1",
+        )
+        self.assertEqual(replacement.subject_id, original.subject_id)
+        for identifier in ("AC-42", "BL-900"):
+            matches = self.store.find_memory_candidates(
+                owner_id="user-1", session_id="unused", project_id=None,
+                project_scope="imports", identifier_references=[IdentifierReference(value=identifier)],
+            )
+            self.assertEqual([record.memory_id for record in matches], [replacement.memory_id])
+        self.assertEqual(
+            [record.memory_id for record in self.store.list_subject_records(
+                replacement.subject_id, owner_id="user-1",
+            )],
+            [original.memory_id, replacement.memory_id],
+        )
+
+    def test_same_identifier_in_different_projects_has_different_subjects(self) -> None:
+        first = MemoryRecord(
+            owner_id="user-1", scope="project", project_scope="imports", kind="event",
+            status="active", user_confirmed=True,
+            payload=EventMemory(event_type="shipment", summary="AC-42 in imports",
+                                identifier_references=[IdentifierReference(value="AC-42")]),
+        )
+        second = MemoryRecord(
+            owner_id="user-1", scope="project", project_scope="exports", kind="event",
+            status="active", user_confirmed=True,
+            payload=EventMemory(event_type="shipment", summary="AC-42 in exports",
+                                identifier_references=[IdentifierReference(value="AC-42")]),
+        )
+        self.store.upsert(first)
+        self.store.upsert(second)
+        self.assertIsNotNone(first.subject_id)
+        self.assertIsNotNone(second.subject_id)
+        self.assertNotEqual(first.subject_id, second.subject_id)
+
+    def test_subject_survives_project_id_stabilization(self) -> None:
+        record = MemoryRecord(
+            owner_id="user-1", scope="project", project_scope="imports", kind="event",
+            status="active", user_confirmed=True,
+            payload=EventMemory(event_type="shipment", summary="AC-42 in imports",
+                                identifier_references=[IdentifierReference(value="AC-42")]),
+        )
+        self.store.upsert(record)
+        subject_id = record.subject_id
+        record.project_id = "imports-id"
+        self.store.upsert(record, event_type="project_id_assigned")
+        self.assertEqual(record.subject_id, subject_id)
+        matches = self.store.find_memory_candidates(
+            owner_id="user-1", session_id="unused", project_id="imports-id",
+            project_scope="imports", identifier_references=[IdentifierReference(value="AC-42")],
+        )
+        self.assertEqual([item.memory_id for item in matches], [record.memory_id])
 
     def test_expiration_marks_record_without_deleting_it(self) -> None:
         record = MemoryRecord(

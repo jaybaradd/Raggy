@@ -79,6 +79,79 @@ class MemoryContextPlannerTests(unittest.TestCase):
         self.assertEqual(result.planner_status, "no_selection")
         self.assertEqual(result.memories, [])
 
+    def test_delayed_correction_can_resolve_from_scoped_semantic_memory(self) -> None:
+        self.store.upsert(self._record("shipment", reference="SHIPMENT-7"))
+        result = asyncio.run(build_memory_context(
+            query="The shipment is now expected on Thursday", owner_id="default",
+            session_id="different-chat", project_id="imports-id", project_scope="imports",
+            store=self.store,
+            semantic_retriever=self._semantic({"memory_id": "shipment", "score": 0.93}),
+            graph_expansion_enabled=False,
+            planner_provider=_Planner({
+                "selected_memory_ids": ["shipment"],
+                "relationships": [{
+                    "memory_id": "shipment", "relation": "updates", "confidence": 0.96,
+                }],
+            }),
+        ))
+        self.assertEqual([memory["memory_id"] for memory in result.memories], ["shipment"])
+        self.assertEqual(result.memories[0]["candidate_source"], "semantic")
+        self.assertEqual(result.memories[0]["selection_relation"], "updates")
+
+    def test_previous_response_is_only_a_planner_candidate(self) -> None:
+        continuity = self._record("continuity", reference="SHIPMENT-7")
+        self.store.upsert(continuity)
+        result = asyncio.run(build_memory_context(
+            query="It is arriving on Thursday", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store,
+            continuity_candidates=[continuity],
+            semantic_retriever=self._semantic({"memory_id": "continuity", "score": 0.99}),
+            graph_expansion_enabled=False,
+            planner_provider=_Planner({"selected_memory_ids": [], "relationships": []}),
+        ))
+        self.assertEqual(result.memories, [])
+        self.assertEqual(result.candidate_counts["previous_response"], 1)
+
+    def test_planner_can_select_previous_response_as_an_update(self) -> None:
+        continuity = self._record("continuity", reference="SHIPMENT-7")
+        self.store.upsert(continuity)
+        result = asyncio.run(build_memory_context(
+            query="It is arriving on Thursday", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store,
+            continuity_candidates=[continuity],
+            semantic_retriever=self._semantic({"memory_id": "continuity", "score": 0.99}),
+            graph_expansion_enabled=False,
+            planner_provider=_Planner({
+                "selected_memory_ids": ["continuity"],
+                "relationships": [{
+                    "memory_id": "continuity", "relation": "updates", "confidence": 0.97,
+                }],
+            }),
+        ))
+        self.assertEqual(result.memories[0]["candidate_source"], "previous_response")
+        self.assertEqual(result.memories[0]["selection_relation"], "updates")
+
+    def test_explicit_identifier_suppresses_previous_response_candidate(self) -> None:
+        continuity = self._record("continuity", reference="SHIPMENT-7")
+        exact = self._record("exact", reference="TRAIN-42")
+        self.store.upsert(continuity)
+        self.store.upsert(exact)
+        result = asyncio.run(build_memory_context(
+            query="TRAIN-42 is arriving on Thursday", owner_id="default", session_id="new-chat",
+            project_id="imports-id", project_scope="imports", store=self.store,
+            continuity_candidates=[continuity],
+            semantic_retriever=self._semantic({"memory_id": "continuity", "score": 0.99}),
+            graph_expansion_enabled=False,
+            planner_provider=_Planner({
+                "selected_memory_ids": ["exact"],
+                "relationships": [{
+                    "memory_id": "exact", "relation": "updates", "confidence": 0.99,
+                }],
+            }),
+        ))
+        self.assertEqual([memory["memory_id"] for memory in result.memories], ["exact"])
+        self.assertEqual(result.candidate_counts["previous_response"], 0)
+
     def test_invalid_planner_output_falls_back_to_high_confidence_exact_candidate(self) -> None:
         self.store.upsert(self._record("exact"))
         result = asyncio.run(build_memory_context(

@@ -2,6 +2,32 @@
 
 ---
 
+### ✅ [2026-10-08] Safe Markdown answer rendering
+
+- Assistant answers now render Markdown headings, paragraphs, emphasis, lists, links, blockquotes, code, and tables in both live streams and restored chat history. User messages remain plain text.
+- Rendering is dependency-free and builds DOM nodes directly. Raw model-produced HTML is never executed, and links are restricted to safe HTTP, HTTPS, and email schemes.
+- Live output is rendered at most once per animation frame, then finalized when streaming completes; source, memory, and attachment cards remain separate from answer content.
+
+---
+
+### ✅ [2026-10-08] First-message chat titles and sidebar hierarchy
+
+- New default-titled chats now use one bounded LLM call to derive a two-to-seven-word title from the first user message. The call runs alongside context preparation, validates and trims provider output, falls back locally on provider failure, and compare-and-sets the title so an existing title cannot be overwritten.
+- The stream publishes the resolved title before answer tokens, allowing the header and sidebar to update during the first response. Existing default-titled chats are backfilled locally from their first user message when the session repository starts.
+- Reworked the sidebar into collapsible project groups with chat counts, clearer indentation, compact untitled-state wording, and a strongly visible selected-chat marker. Only the active group opens automatically, reducing long-project clutter.
+
+---
+
+### ✅ [2026-10-08] Phase 4 — bounded event claim-change command
+
+- Added `propose_event_claim_change` as the sole server-owned command for proposing corrections to existing event claims. It rehydrates the selected target, enforces current owner/session/project visibility, inherits the target's authoritative scope and stable subject, and never gives the model direct database access.
+- Routed every reconciled event update through the command while retaining the existing conflict-review UI. Proposed changes remain candidates until accepted; acceptance continues to create the audited supersession relationship and projection-outbox work atomically.
+- Made correction retries deterministic per source turn and target. SQLite and PostgreSQL reconciliation now return an existing proposal instead of opening another conflict, with a PostgreSQL advisory lock covering concurrent retries.
+- Added focused coverage for scoped rejection, audit metadata, projection jobs, retry idempotency, review acceptance, and old/new identifier aliases resolving to the accepted subject version.
+- Removed few-shot examples and domain-specific event labels from the runtime memory prompts. Extraction and reconciliation are now described only through typed contracts and domain-neutral behavioral rules.
+
+---
+
 ### ✅ [2026-09-20] Memory privacy boundary hardening
 
 - Personal chats now retrieve only memories from their own session. Project memories remain available only to chats in the matching project; no project-wide record can enter a Personal-chat prompt.

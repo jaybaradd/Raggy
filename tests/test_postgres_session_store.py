@@ -61,6 +61,20 @@ class PostgresSessionRepositoryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             restarted.create_session(project_id=project["project_id"], owner_id="owner-b")
 
+    def test_generated_title_is_compare_and_set(self) -> None:
+        session = self.store.create_session(owner_id="owner-a")
+        self.store.append_message(session["session_id"], "user", "First message", owner_id="owner-a")
+
+        titled = self.store.update_title_if_default(
+            session["session_id"], "Generated title", owner_id="owner-a",
+        )
+        unchanged = self.store.update_title_if_default(
+            session["session_id"], "Replacement title", owner_id="owner-a",
+        )
+
+        self.assertEqual(titled["title"], "Generated title")
+        self.assertEqual(unchanged["title"], "Generated title")
+
 
 if __name__ == "__main__":
     unittest.main()
