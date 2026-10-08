@@ -1,4 +1,5 @@
 """Small, stable JSON-lines latency logger for end-to-end tracing."""
+from __future__ import annotations
 
 import json
 import logging

@@ -1,4 +1,5 @@
 """Uvicorn entry point used only by the opt-in Postgres API integration test."""
+from __future__ import annotations
 
 from typing import AsyncIterator
 

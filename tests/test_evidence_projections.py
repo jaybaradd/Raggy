@@ -1,4 +1,5 @@
 """Evidence outbox tests independent of a running Qdrant server."""
+from __future__ import annotations
 
 import unittest
 

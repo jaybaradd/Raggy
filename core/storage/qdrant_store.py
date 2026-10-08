@@ -19,6 +19,7 @@ The client operates in two modes:
   - Local disk (QDRANT_URL=\"./qdrant_data\") — persistent without a server.
 """
 
+from __future__ import annotations
 
 import logging
 import uuid

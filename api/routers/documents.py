@@ -1,4 +1,5 @@
 """Scoped document upload, ingestion status, retry, and source access."""
+from __future__ import annotations
 
 import asyncio
 import logging

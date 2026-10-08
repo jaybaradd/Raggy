@@ -5,6 +5,7 @@ identity and provenance envelope that later knowledge-atom extraction depends
 on without forcing an all-at-once parser rewrite.
 """
 
+from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal

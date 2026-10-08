@@ -1,5 +1,6 @@
 """Constrained post-turn reconciliation of an extracted event and its candidates."""
 
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal

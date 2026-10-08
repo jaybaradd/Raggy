@@ -4,6 +4,7 @@ Authoritative memory writes enqueue durable work. This module performs the
 best-effort projection writes and leaves failed jobs inspectable/retryable.
 """
 
+from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING

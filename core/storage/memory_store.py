@@ -1,5 +1,6 @@
 """SQLite repository for Phase 2A memory records and audit history."""
 
+from __future__ import annotations
 
 import json
 import sqlite3

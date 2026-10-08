@@ -1,5 +1,6 @@
 """Unit tests for the FalkorDB graph adapter without a running Falkor server."""
 
+from __future__ import annotations
 
 from datetime import datetime, timezone
 import unittest

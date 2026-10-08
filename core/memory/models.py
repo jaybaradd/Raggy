@@ -1,5 +1,6 @@
 """Phase 2A memory contracts: typed claims with scope and provenance."""
 
+from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal, Union

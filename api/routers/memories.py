@@ -1,5 +1,6 @@
 """Review and lifecycle APIs for candidate and durable memories."""
 
+from __future__ import annotations
 
 import logging
 

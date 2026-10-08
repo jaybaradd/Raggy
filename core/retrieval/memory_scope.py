@@ -1,4 +1,5 @@
 """Pure scope-selection rules shared by memory retrieval implementations."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone

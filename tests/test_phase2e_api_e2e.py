@@ -9,6 +9,7 @@ the real memory projection, and the real Qdrant retrieval path. It is opt-in
 because it calls the configured LLM provider and requires a running server.
 """
 
+from __future__ import annotations
 
 import json
 import os

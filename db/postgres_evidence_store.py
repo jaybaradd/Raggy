@@ -1,4 +1,5 @@
 """PostgreSQL authority for immutable assets, scoped bindings, and evidence."""
+from __future__ import annotations
 
 import hashlib
 import json

@@ -3,6 +3,7 @@
 Run with ``RUN_QDRANT_E2E=1``.  The test uses Qdrant's isolated in-memory
 client, but the production QdrantStore implementation and payload format.
 """
+from __future__ import annotations
 
 import os
 import unittest

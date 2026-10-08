@@ -1,4 +1,5 @@
 """Generic post-turn reconciliation preserves facts until a human reviews updates."""
+from __future__ import annotations
 
 import asyncio
 import tempfile

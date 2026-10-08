@@ -1,5 +1,6 @@
 """Bounded decomposition preserves a single final retrieval ranking."""
 
+from __future__ import annotations
 
 import importlib
 import sys

@@ -1,5 +1,6 @@
 """Deterministic association of one extracted event to selected memory context."""
 
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass

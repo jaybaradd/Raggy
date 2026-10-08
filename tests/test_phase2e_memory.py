@@ -5,6 +5,7 @@ embeddings, or Qdrant. Retrieval-provider tests can be added separately once
 the evaluation harness has a stable model fixture.
 """
 
+from __future__ import annotations
 
 import tempfile
 import unittest

@@ -1,5 +1,6 @@
 """Wait for Compose dependencies, then run Raggy's normal entrypoint."""
 
+from __future__ import annotations
 
 import os
 import socket

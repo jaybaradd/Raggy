@@ -1,5 +1,6 @@
 """Deterministic repository tests for event deduplication and conflicts."""
 
+from __future__ import annotations
 
 import tempfile
 import unittest

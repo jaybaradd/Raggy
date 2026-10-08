@@ -12,6 +12,7 @@ with Uvicorn's reload mode: the reload supervisor and worker are separate
 processes and would both try to open the same local Qdrant directory.
 """
 
+from __future__ import annotations
 
 import asyncio
 import logging

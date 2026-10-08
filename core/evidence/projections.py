@@ -1,4 +1,5 @@
 """Rebuildable evidence-to-Qdrant projection worker."""
+from __future__ import annotations
 import logging
 from core.ingestion.models import EvidenceSegment
 from core.ingestion.parser import ParsedChunk

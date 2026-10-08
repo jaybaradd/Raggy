@@ -1,4 +1,5 @@
 """Migration runner guarantees ordered, atomic, idempotent schema changes."""
+from __future__ import annotations
 
 import sqlite3
 import unittest

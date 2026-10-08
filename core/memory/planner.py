@@ -5,6 +5,7 @@ matches: they are safe fallback context, while semantic candidates must be
 approved by the constrained planner before they reach the answer model.
 """
 
+from __future__ import annotations
 
 import logging
 import re

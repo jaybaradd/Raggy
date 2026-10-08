@@ -1,5 +1,6 @@
 """Stable project IDs propagate through authoritative and derived memory state."""
 
+from __future__ import annotations
 
 import tempfile
 import unittest

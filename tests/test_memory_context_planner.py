@@ -1,4 +1,5 @@
 """Pre-response memory planning remains bounded, scoped, and fail-safe."""
+from __future__ import annotations
 
 import asyncio
 import tempfile

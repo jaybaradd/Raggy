@@ -1,5 +1,6 @@
 """Opt-in integration coverage for the Postgres-to-Falkor graph projection."""
 
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import importlib.util

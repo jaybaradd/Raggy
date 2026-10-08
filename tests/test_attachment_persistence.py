@@ -1,5 +1,6 @@
 """Attachment metadata is validated, persisted, and restart-safe."""
 
+from __future__ import annotations
 
 import asyncio
 import importlib

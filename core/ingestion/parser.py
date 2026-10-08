@@ -4,6 +4,7 @@ core/ingestion/parser.py — Parser abstraction + all modality parsers.
 Each parser produces a list[ParsedChunk]. Everything downstream is modality-agnostic.
 """
 
+from __future__ import annotations
 
 import hashlib
 import logging

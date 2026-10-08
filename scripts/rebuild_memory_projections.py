@@ -4,6 +4,7 @@ Run while no other process is writing the local Qdrant directory:
     python scripts/rebuild_memory_projections.py
 """
 
+from __future__ import annotations
 
 import sys
 from pathlib import Path

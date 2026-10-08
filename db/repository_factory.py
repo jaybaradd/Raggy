@@ -1,4 +1,5 @@
 """Select authoritative repository implementations from one configuration seam."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock

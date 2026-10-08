@@ -5,6 +5,7 @@ Keeping schemas in one file makes it easy to see the full API surface at a
 glance and avoids circular imports between routers.
 """
 
+from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal

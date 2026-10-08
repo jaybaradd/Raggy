@@ -4,6 +4,7 @@ This is intentionally constructible directly for migration and integration
 testing.  The application factory continues to use SQLite until every
 authoritative repository has a PostgreSQL implementation.
 """
+from __future__ import annotations
 
 import re
 import json
